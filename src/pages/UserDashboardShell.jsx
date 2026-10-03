@@ -1,0 +1,348 @@
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { Link } from 'react-router-dom';
+import {
+  FileText,
+  Clock,
+  CheckCircle,
+  AlertTriangle,
+  Plus,
+  History,
+  RefreshCw,
+  Building2,
+} from 'lucide-react';
+
+import { useAuth } from '../hooks/useAuth';
+import { useWorkspace } from '../hooks/useWorkspace';
+
+import { PageContainer } from '../components/layout/PageContainer';
+import { GlassCard } from '../components/ui/GlassCard';
+import { Button } from '../components/ui/Button';
+import { Badge } from '../components/ui/Badge';
+import { SectionHeader } from '../components/ui/SectionHeader';
+import { RealtimeClock } from '../components/common/RealtimeClock';
+import { IdentityToggle } from '../components/common/IdentityToggle';
+import { DailyCheckInWidget } from '../components/checkin/DailyCheckInWidget';
+import { ProblemFeed } from '../components/problem/ProblemFeed';
+import { SubmitProblemModal } from '../components/problem/SubmitProblemModal';
+import { WorkspaceHistoryModal } from '../components/history/WorkspaceHistoryModal';
+import { getShiftStatus } from '../config/shiftConfig';
+import { getWorkspaceProblems, subscribeToWorkspaceProblems } from '../services/problemService';
+import { syncDailySnapshotFromMetrics } from '../services/historyService';
+
+export const UserDashboardShell = () => {
+  const { userProfile, currentUser } = useAuth();
+  const { currentWorkspace } = useWorkspace();
+
+  const [problems, setProblems] = useState([]);
+  const [loadingProblems, setLoadingProblems] = useState(false);
+  const [reportModalOpen, setReportModalOpen] = useState(false);
+  const [reportIsEmergency, setReportIsEmergency] = useState(false);
+  const [historyModalOpen, setHistoryModalOpen] = useState(false);
+
+  const greetingName = userProfile?.fullName || currentUser?.displayName || 'Member';
+
+  const wsId = currentWorkspace?.id;
+
+  // Load problems strictly scoped to active workspace
+  const loadProblems = useCallback(async () => {
+    if (!wsId) {
+      setProblems([]);
+      return;
+    }
+    setLoadingProblems(true);
+    try {
+      const data = await getWorkspaceProblems(wsId);
+      setProblems(data);
+    } catch (err) {
+      console.error('[UNSAID Load Problems Error]', err);
+    } finally {
+      setLoadingProblems(false);
+    }
+  }, [wsId]);
+
+  useEffect(() => {
+    let ignore = false;
+    if (!wsId) {
+      queueMicrotask(() => {
+        if (!ignore) setProblems([]);
+      });
+      return;
+    }
+
+    queueMicrotask(() => {
+      if (!ignore) setLoadingProblems(true);
+    });
+
+    const unsubscribe = subscribeToWorkspaceProblems(
+      wsId,
+      (data) => {
+        if (!ignore) {
+          setProblems(data);
+          setLoadingProblems(false);
+        }
+      },
+      (err) => {
+        if (!ignore) {
+          console.error('[UNSAID Load Problems Error]', err);
+          setLoadingProblems(false);
+        }
+      }
+    );
+
+    return () => {
+      ignore = true;
+      if (typeof unsubscribe === 'function') {
+        unsubscribe();
+      }
+    };
+  }, [wsId]);
+
+  // Derived metrics from workspace problems
+  const metrics = useMemo(() => {
+    const total = problems.length;
+    const openCount = problems.filter((p) => p.status === 'open').length;
+    const emergencyCount = problems.filter((p) => p.isEmergency).length;
+    const solvedCount = problems.filter((p) => p.status === 'solved').length;
+    return { total, openCount, emergencyCount, solvedCount };
+  }, [problems]);
+
+  // Synchronize 10-day rolling daily snapshot for active workspace
+  useEffect(() => {
+    if (!wsId || loadingProblems) return;
+    syncDailySnapshotFromMetrics({ workspaceId: wsId, problems }).catch(() => {});
+  }, [wsId, problems, loadingProblems]);
+
+  const shiftStatus = useMemo(() => {
+    return getShiftStatus(currentWorkspace?.shiftConfig);
+  }, [currentWorkspace?.shiftConfig]);
+
+  const handleOpenNormalReport = () => {
+    setReportIsEmergency(false);
+    setReportModalOpen(true);
+  };
+
+  const handleOpenEmergencyReport = () => {
+    setReportIsEmergency(true);
+    setReportModalOpen(true);
+  };
+
+  const handleProblemSubmitted = (newProblem) => {
+    setProblems((prev) => [newProblem, ...prev]);
+  };
+
+  return (
+    <PageContainer size="lg" className="space-y-8">
+      {/* 1. Header with dynamic workspace context and Live Clock */}
+      <div className="space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <SectionHeader
+            title={`Welcome back, ${greetingName}`}
+            subtitle={
+              currentWorkspace
+                ? `Active Workspace: ${currentWorkspace.name} (${currentWorkspace.domain || 'community'}) · Query Resolution Core`
+                : 'No active workspace selected. Select or join an approved workspace to report queries.'
+            }
+            badge={
+              <Badge variant="cyan" size="sm" dot>
+                {currentWorkspace ? currentWorkspace.domain : 'Unassigned'}
+              </Badge>
+            }
+            action={
+              <div className="flex items-center gap-2 flex-wrap">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  icon={<History className="w-4 h-4" />}
+                  onClick={() => setHistoryModalOpen(true)}
+                  disabled={!currentWorkspace}
+                >
+                  Archive
+                </Button>
+                <Button
+                  variant="danger"
+                  size="sm"
+                  icon={<AlertTriangle className="w-4 h-4" />}
+                  onClick={handleOpenEmergencyReport}
+                  disabled={!currentWorkspace}
+                >
+                  Emergency
+                </Button>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  icon={<Plus className="w-4 h-4" />}
+                  onClick={handleOpenNormalReport}
+                  disabled={!currentWorkspace}
+                >
+                  Report Problem
+                </Button>
+              </div>
+            }
+          />
+        </div>
+
+        {/* Live Clock & Shift Lifecycle Bar */}
+        <div className="p-3.5 rounded-2xl bg-[var(--surface)] border border-[var(--glass-border)] flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs shadow-xs">
+          <div className="flex items-center gap-4 flex-wrap">
+            <RealtimeClock showDate={true} />
+            <span className="text-[var(--text-muted)] hidden md:inline">•</span>
+            <div className="flex items-center gap-2">
+              <span className="text-[var(--text-muted)]">Shift:</span>
+              <Badge variant={shiftStatus.isShiftActive ? 'low' : 'neutral'} size="sm" dot>
+                {shiftStatus.shiftText} · {shiftStatus.nextShiftText}
+              </Badge>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3 flex-wrap justify-between sm:justify-end">
+            <IdentityToggle compact={false} />
+            <div className="flex items-center gap-1.5 text-[11px] text-[var(--text-muted)] border-l border-[var(--glass-border)] pl-3">
+              <button
+                type="button"
+                onClick={loadProblems}
+                disabled={loadingProblems}
+                className="text-[var(--primary)] hover:underline inline-flex items-center gap-1 cursor-pointer"
+                title="Refresh problem feed"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${loadingProblems ? 'animate-spin' : ''}`} />
+                <span>Sync</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* 2. Responsive Metrics Overview (Calculated from active workspace problems) */}
+      <section className="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
+        <GlassCard className="space-y-1.5 p-4 sm:p-5">
+          <div className="flex items-center justify-between text-[var(--text-muted)] text-xs font-semibold uppercase tracking-wider">
+            <span>Total Queries</span>
+            <FileText className="w-4 h-4 text-[var(--primary)]" />
+          </div>
+          <div className="text-2xl sm:text-3xl font-extrabold text-[var(--text)]">
+            {loadingProblems || !currentWorkspace ? '--' : metrics.total}
+          </div>
+          <div className="text-[11px] text-[var(--text-muted)]">Workspace queries submitted</div>
+        </GlassCard>
+
+        <GlassCard className="space-y-1.5 p-4 sm:p-5">
+          <div className="flex items-center justify-between text-[var(--text-muted)] text-xs font-semibold uppercase tracking-wider">
+            <span>Active / Open</span>
+            <Clock className="w-4 h-4 text-[var(--warning)]" />
+          </div>
+          <div className="text-2xl sm:text-3xl font-extrabold text-[var(--text)]">
+            {loadingProblems || !currentWorkspace ? '--' : metrics.openCount}
+          </div>
+          <div className="text-[11px] text-[var(--text-muted)]">Under review or resolution</div>
+        </GlassCard>
+
+        <GlassCard className="space-y-1.5 p-4 sm:p-5">
+          <div className="flex items-center justify-between text-[var(--text-muted)] text-xs font-semibold uppercase tracking-wider">
+            <span>Emergencies</span>
+            <AlertTriangle className="w-4 h-4 text-[var(--danger)]" />
+          </div>
+          <div className="text-2xl sm:text-3xl font-extrabold text-[var(--danger)]">
+            {loadingProblems || !currentWorkspace ? '--' : metrics.emergencyCount}
+          </div>
+          <div className="text-[11px] text-[var(--text-muted)]">High-priority escalations</div>
+        </GlassCard>
+
+        <GlassCard className="space-y-1.5 p-4 sm:p-5">
+          <div className="flex items-center justify-between text-[var(--text-muted)] text-xs font-semibold uppercase tracking-wider">
+            <span>Resolved</span>
+            <CheckCircle className="w-4 h-4 text-[var(--success)]" />
+          </div>
+          <div className="text-2xl sm:text-3xl font-extrabold text-[var(--success)]">
+            {loadingProblems || !currentWorkspace ? '--' : metrics.solvedCount}
+          </div>
+          <div className="text-[11px] text-[var(--text-muted)]">Verified fixes in workspace</div>
+        </GlassCard>
+      </section>
+
+      {/* 3. Daily Pulse Check-in Widget */}
+      {currentWorkspace && (
+        <DailyCheckInWidget
+          workspace={currentWorkspace}
+          currentUser={currentUser}
+          userProfile={userProfile}
+        />
+      )}
+
+      {/* No Approved Workspace Empty State */}
+      {!currentWorkspace && (
+        <GlassCard variant="panel" className="p-8 text-center space-y-4 border border-[var(--glass-border)]">
+          <div className="w-14 h-14 rounded-2xl bg-[var(--surface)] border border-[var(--glass-border)] flex items-center justify-center mx-auto text-[var(--text-muted)]">
+            <Building2 className="w-7 h-7 text-[var(--primary)]" />
+          </div>
+          <div className="space-y-1.5 max-w-md mx-auto">
+            <h3 className="text-base font-bold text-[var(--text)]">No Approved Workspaces</h3>
+            <p className="text-xs text-[var(--text-muted)] leading-relaxed">
+              You are not currently a member of any approved workspace. Join an existing workspace with an invite link or ask your workspace administrator for access.
+            </p>
+          </div>
+          <div className="pt-1">
+            <Link to="/workspace">
+              <Button variant="primary" size="sm">
+                Explore Workspaces
+              </Button>
+            </Link>
+          </div>
+        </GlassCard>
+      )}
+
+      {/* 4. Live Workspace Problem Stream */}
+      <section className="space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-lg font-bold text-[var(--text)] flex items-center gap-2">
+              <span>Workspace Problem Stream</span>
+              <Badge variant="cyan" size="sm">
+                Live Feed
+              </Badge>
+            </h3>
+            <p className="text-xs text-[var(--text-muted)]">
+              All community-reported queries for {currentWorkspace?.name || 'your workspace'}.
+            </p>
+          </div>
+
+          {currentWorkspace && (
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={<Plus className="w-3.5 h-3.5" />}
+              onClick={handleOpenNormalReport}
+            >
+              New Query
+            </Button>
+          )}
+        </div>
+
+        <ProblemFeed
+          problems={problems}
+          loading={loadingProblems}
+          workspace={currentWorkspace}
+          currentUser={currentUser}
+          onOpenReportModal={handleOpenNormalReport}
+          onRefresh={loadProblems}
+        />
+      </section>
+
+      {/* Modals */}
+      <SubmitProblemModal
+        isOpen={reportModalOpen}
+        onClose={() => setReportModalOpen(false)}
+        workspace={currentWorkspace}
+        currentUser={currentUser}
+        userProfile={userProfile}
+        defaultEmergency={reportIsEmergency}
+        onProblemSubmitted={handleProblemSubmitted}
+      />
+
+      <WorkspaceHistoryModal
+        isOpen={historyModalOpen}
+        onClose={() => setHistoryModalOpen(false)}
+        workspace={currentWorkspace}
+      />
+    </PageContainer>
+  );
+};
