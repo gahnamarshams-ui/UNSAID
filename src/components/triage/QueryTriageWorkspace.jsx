@@ -3,7 +3,6 @@ import {
   Search,
   RotateCcw,
   CheckCircle2,
-  Clock,
   ThumbsUp,
   MessageSquare,
   BarChart3,
@@ -60,6 +59,7 @@ import {
   deduplicateReporters,
 } from '../../services/problemService';
 import { subscribeToProblemPoll } from '../../services/pollService';
+import { ResolutionVerificationPoll } from '../poll/ResolutionVerificationPoll';
 
 /**
  * Format helper for timestamps (Timestamp, ISO, Date, or millis)
@@ -158,6 +158,7 @@ export const QueryTriageWorkspace = ({
   const [resolutionText, setResolutionText] = useState('');
   const [resolutionActionTaken, setResolutionActionTaken] = useState('');
   const [publishingResolution, setPublishingResolution] = useState(false);
+  const [resolutionError, setResolutionError] = useState('');
 
   const [showRecurrenceModal, setShowRecurrenceModal] = useState(false);
   const [linkedProblemId, setLinkedProblemId] = useState('');
@@ -584,37 +585,40 @@ export const QueryTriageWorkspace = ({
     if (!resolutionText.trim() || !selectedProblem?.id) return;
 
     setPublishingResolution(true);
+    setResolutionError('');
     try {
-      await broadcastOfficialResolution({
+      const targetWorkspaceId = workspace?.id || selectedProblem.workspaceId;
+      const officialRes = await broadcastOfficialResolution({
         problemId: selectedProblem.id,
+        workspaceId: targetWorkspaceId,
         resolutionText: resolutionText.trim(),
         actionTaken: resolutionActionTaken.trim(),
-        currentUser,
-        userProfile,
+        adminUser: currentUser,
+        adminProfile: userProfile,
       });
 
+      const nextCycle = (Number(selectedProblem.resolutionCycle) || 0) + 1;
       const updated = {
         ...selectedProblem,
-        status: 'solved',
-        officialResolution: {
-          problemId: selectedProblem.id,
-          workspaceId: selectedProblem.workspaceId,
-          resolutionText: resolutionText.trim(),
-          actionTaken: resolutionActionTaken.trim(),
-          resolvedBy: currentUser?.uid,
-          resolvedByName: userProfile?.fullName || currentUser?.displayName || 'Workspace Admin',
-          resolvedAt: new Date().toISOString(),
-          isOfficial: true,
-        },
+        status: 'awaiting_verification',
+        resolutionPendingVerification: true,
+        isReopened: false,
+        resolutionCycle: nextCycle,
+        currentPollId: `${selectedProblem.id}_c${nextCycle}`,
+        officialResolution: officialRes,
+        stillReportingCount: 0,
+        unresolvedUsers: [],
       };
 
       setLocalProblemOverride(updated);
       setShowResolutionModal(false);
       setResolutionText('');
       setResolutionActionTaken('');
+      setResolutionError('');
       if (onProblemUpdated) onProblemUpdated(updated);
     } catch (err) {
       console.error('[UNSAID Publish Resolution Error]', err);
+      setResolutionError(err?.message || 'Failed to publish official resolution.');
     } finally {
       setPublishingResolution(false);
     }
@@ -929,11 +933,25 @@ export const QueryTriageWorkspace = ({
                           {prob.priority ? prob.priority.toUpperCase() : 'NORMAL'}
                         </Badge>
                         <Badge
-                          variant={isSolved ? 'low' : 'warning'}
+                          variant={
+                            prob.status === 'solved'
+                              ? 'low'
+                              : prob.status === 'awaiting_verification'
+                              ? 'cyan'
+                              : prob.status === 'reopened'
+                              ? 'high'
+                              : 'warning'
+                          }
                           size="sm"
                           dot
                         >
-                          {isSolved ? 'SOLVED' : 'OPEN'}
+                          {prob.status === 'solved'
+                            ? 'SOLVED'
+                            : prob.status === 'awaiting_verification'
+                            ? 'AWAITING VERIFICATION'
+                            : prob.status === 'reopened'
+                            ? 'REOPENED'
+                            : 'OPEN'}
                         </Badge>
                         {prob.isRecurring && (
                           <Badge variant="cyan" size="sm" icon={<RotateCcw className="w-2.5 h-2.5" />}>
@@ -1445,40 +1463,24 @@ export const QueryTriageWorkspace = ({
                 </div>
               </div>
 
-              {/* Official Resolution Banner (if published) */}
-              {selectedProblem.officialResolution && (
-                <div className="p-4 rounded-2xl bg-[var(--success-light)]/20 border-2 border-[var(--success)]/60 text-[var(--text)] space-y-2 shadow-sm ring-1 ring-[var(--success)]/20">
-                  <div className="flex items-center justify-between flex-wrap gap-2">
-                    <Badge variant="low" size="sm" icon={<Award className="w-3.5 h-3.5" />}>
-                      OFFICIAL RESOLUTION
-                    </Badge>
-                    <span className="text-[11px] text-[var(--text-muted)] flex items-center gap-1 font-mono">
-                      <Clock className="w-3 h-3" />
-                      {formatFullTime(selectedProblem.officialResolution.resolvedAt)}
-                    </span>
-                  </div>
-
-                  <div className="text-sm font-bold text-[var(--text)]">
-                    {selectedProblem.officialResolution.resolutionText}
-                  </div>
-
-                  {selectedProblem.officialResolution.actionTaken && (
-                    <div className="text-xs text-[var(--text-secondary)] bg-[var(--surface)] p-2.5 rounded-xl border border-[var(--glass-border)]">
-                      <strong className="block text-[11px] text-[var(--text)] mb-0.5">
-                        Action Taken:
-                      </strong>
-                      {selectedProblem.officialResolution.actionTaken}
-                    </div>
-                  )}
-
-                  <div className="text-[11px] text-[var(--text-muted)] flex items-center gap-1.5 pt-0.5">
-                    <ShieldCheck className="w-3.5 h-3.5 text-[var(--success)]" />
-                    <span>Verified by:</span>
-                    <strong className="text-[var(--text)]">
-                      {selectedProblem.officialResolution.resolvedByName || 'Workspace Administration'}
-                    </strong>
-                  </div>
-                </div>
+              {/* Official Resolution & Unanimous Verification Poll */}
+              {(selectedProblem.officialResolution || selectedProblem.currentPollId || selectedProblem.status === 'awaiting_verification' || selectedProblem.status === 'reopened' || selectedProblem.status === 'solved') && (
+                <ResolutionVerificationPoll
+                  problem={selectedProblem}
+                  workspaceId={workspace?.id || selectedProblem.workspaceId}
+                  currentUser={currentUser}
+                  userProfile={userProfile}
+                  isAdmin={true}
+                  onStatusChanged={(id, newStatus) => {
+                    const up = { ...selectedProblem, status: newStatus };
+                    setLocalProblemOverride(up);
+                    if (onProblemUpdated) onProblemUpdated(up);
+                  }}
+                  onProblemUpdated={(updated) => {
+                    setLocalProblemOverride(updated);
+                    if (onProblemUpdated) onProblemUpdated(updated);
+                  }}
+                />
               )}
 
               {/* ========================================================= */}
@@ -1667,7 +1669,13 @@ export const QueryTriageWorkspace = ({
                             <CheckCircle2 className="w-3.5 h-3.5" />
                           )
                         }
-                        onClick={handleToggleSolved}
+                        onClick={() => {
+                          if (selectedProblem.status === 'solved') {
+                            handleToggleSolved();
+                          } else {
+                            setShowResolutionModal(true);
+                          }
+                        }}
                         className="text-xs"
                       >
                         {selectedProblem.status === 'solved' ? 'Reopen' : 'Resolve'}
@@ -1932,7 +1940,7 @@ export const QueryTriageWorkspace = ({
                 <div className="pt-1">
                   <CommunityPollWidget
                     problemId={selectedProblem.id}
-                    workspaceId={selectedProblem.workspaceId}
+                    workspaceId={workspace?.id || selectedProblem.workspaceId}
                     currentUser={currentUser}
                     userProfile={userProfile}
                     isAdmin={isAdmin}
@@ -2015,6 +2023,13 @@ export const QueryTriageWorkspace = ({
             </div>
 
             <form onSubmit={handleBroadcastResolution} className="space-y-3 text-xs">
+              {resolutionError && (
+                <div className="p-2.5 rounded-xl bg-[var(--danger)]/10 border border-[var(--danger)]/30 text-[var(--danger)] text-[11px] flex items-center gap-2">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span>{resolutionError}</span>
+                </div>
+              )}
+
               <div className="space-y-1">
                 <label className="text-[11px] font-semibold text-[var(--text-secondary)] block">
                   Resolution Explanation <span className="text-[var(--danger)]">*</span>

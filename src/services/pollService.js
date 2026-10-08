@@ -42,6 +42,11 @@ export const subscribeToProblemPoll = (problemId, onUpdate, onError) => {
       },
       (err) => {
         console.warn('[UNSAID Poll] Poll subscription error:', err);
+        if (err?.code === 'permission-denied') {
+          // Document does not exist yet under deployed rules evaluating resource.data
+          if (onUpdate) onUpdate(null);
+          return;
+        }
         if (onError) onError(err);
       }
     );
@@ -57,7 +62,7 @@ export const subscribeToProblemPoll = (problemId, onUpdate, onError) => {
  * Subscribes to all votes/responses for a problem poll in real-time.
  * Computes exact counts and percentages dynamically from real Firestore records.
  */
-export const subscribeToPollResponses = (problemId, onUpdate, onError) => {
+export const subscribeToPollResponses = (problemId, onUpdate, onError, workspaceId) => {
   if (!problemId) {
     if (onUpdate) onUpdate({ responses: [], counts: {}, percentages: {}, totalVotes: 0 });
     return () => {};
@@ -70,7 +75,9 @@ export const subscribeToPollResponses = (problemId, onUpdate, onError) => {
 
   try {
     const responsesRef = collection(db, RESPONSES_COLLECTION);
-    const q = query(responsesRef, where('problemId', '==', problemId));
+    const q = workspaceId
+      ? query(responsesRef, where('workspaceId', '==', workspaceId), where('problemId', '==', problemId))
+      : query(responsesRef, where('problemId', '==', problemId));
 
     const unsubscribe = onSnapshot(
       q,
@@ -98,6 +105,12 @@ export const subscribeToPollResponses = (problemId, onUpdate, onError) => {
       },
       (err) => {
         console.warn('[UNSAID Poll] Poll responses subscription error:', err);
+        if (err?.code === 'permission-denied') {
+          if (onUpdate) {
+            onUpdate({ responses: [], counts: {}, percentages: {}, totalVotes: 0 });
+          }
+          return;
+        }
         if (onError) onError(err);
       }
     );

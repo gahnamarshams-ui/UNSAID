@@ -113,14 +113,15 @@ export const CommunityPollWidget = ({
         if (!ignore) {
           console.warn('[UNSAID Poll Responses Error]', err);
         }
-      }
+      },
+      workspaceId
     );
 
     return () => {
       ignore = true;
       if (typeof unsubResponses === 'function') unsubResponses();
     };
-  }, [problemId]);
+  }, [problemId, workspaceId]);
 
   // Determine current user's existing vote
   const myVote = pollResponsesData.responses.find(

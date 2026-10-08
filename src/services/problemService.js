@@ -26,6 +26,10 @@ import {
 import { db } from '../config/firebase';
 import { enqueueOfflineProblem, enqueueOfflineMessage } from './offlineSyncService';
 import { checkSimilarProblem } from './aiResolutionService';
+import {
+  createVerificationPoll,
+  submitVerificationVote,
+} from './verificationPollService';
 
 const withTimeout = (promise, ms = 4500) =>
   Promise.race([
@@ -979,6 +983,47 @@ const saveLocalItems = (prefix, problemId, items) => {
 };
 
 /**
+ * Real-time subscription to a single problem document.
+ * Enables live updates across admin triage, problem details modal, and problem feed without reload.
+ */
+export const subscribeToProblem = (problemId, onUpdate, onError) => {
+  if (!problemId) {
+    if (onUpdate) onUpdate(null);
+    return () => {};
+  }
+
+  if (!db) {
+    if (onUpdate) onUpdate(null);
+    return () => {};
+  }
+
+  try {
+    const probRef = doc(db, 'problems', problemId);
+    const unsubscribe = onSnapshot(
+      probRef,
+      (snapshot) => {
+        if (snapshot.exists()) {
+          const data = { id: snapshot.id, ...snapshot.data() };
+          if (onUpdate) onUpdate(data);
+        } else {
+          if (onUpdate) onUpdate(null);
+        }
+      },
+      (err) => {
+        console.warn('[UNSAID Problem Subscription Error]', err);
+        if (onError) onError(err);
+      }
+    );
+
+    return unsubscribe;
+  } catch (err) {
+    console.warn('[UNSAID Problem Listener Setup Failed]', err);
+    if (onError) onError(err);
+    return () => {};
+  }
+};
+
+/**
  * 1. TWO-WAY MESSAGING: Subscribes to problemMessages in real time.
  */
 export const subscribeToProblemMessages = (problemId, onUpdate, onError) => {
@@ -1204,43 +1249,39 @@ export const broadcastOfficialResolution = async ({
     throw new Error('Resolution explanation is required.');
   }
 
-  const resolverName = adminProfile?.fullName || adminUser?.displayName || 'Workspace Admin';
-  const resolverId = adminUser?.uid || 'admin';
-
-  const officialResolution = {
-    resolutionText: text,
-    summary: text,
-    actionTaken: (actionTaken || '').trim(),
-    resolvedBy: resolverId,
-    resolvedByName: resolverName,
-    resolvedAt: new Date().toISOString(),
-    workspaceId: workspaceId || '',
-    problemId,
-  };
-
-  if (workspaceId) {
-    const local = getLocalProblems(workspaceId);
-    const updated = local.map((p) =>
-      p.id === problemId
-        ? {
-            ...p,
-            status: 'solved',
-            officialResolution,
-            updatedAt: new Date().toISOString(),
-          }
-        : p
-    );
-    saveLocalProblems(workspaceId, updated);
-  }
-
+  // Retrieve problem details
+  let problem = null;
   if (db) {
-    const probRef = doc(db, 'problems', problemId);
-    await updateDoc(probRef, {
-      status: 'solved',
-      officialResolution,
-      updatedAt: serverTimestamp(),
-    });
+    try {
+      const probSnap = await getDoc(doc(db, 'problems', problemId));
+      if (probSnap.exists()) {
+        problem = { id: probSnap.id, ...probSnap.data() };
+      }
+    } catch {}
   }
+
+  if (!problem && workspaceId) {
+    const local = getLocalProblems(workspaceId);
+    problem = local.find((p) => p.id === problemId);
+  }
+
+  const effectiveWorkspaceId = workspaceId || problem?.workspaceId || '';
+  if (!problem) {
+    problem = { id: problemId, workspaceId: effectiveWorkspaceId };
+  } else if (!problem.workspaceId && effectiveWorkspaceId) {
+    problem.workspaceId = effectiveWorkspaceId;
+  }
+
+  // Delegates directly to createVerificationPoll to snapshot affected users,
+  // create resolution cycle, and initialize awaiting_verification state.
+  const { officialResolution } = await createVerificationPoll({
+    problem: { ...problem, workspaceId: effectiveWorkspaceId },
+    workspaceId: effectiveWorkspaceId,
+    resolutionText: text,
+    actionTaken,
+    adminUser,
+    adminProfile,
+  });
 
   return officialResolution;
 };
@@ -1726,110 +1767,57 @@ export const submitResolutionVerification = async ({
   workspaceId,
   userId,
   userName = 'Workspace Member',
+  userProfile,
   response, // 'solved' | 'partially_solved' | 'not_solved' | 'still_confused'
+  pollId,
 }) => {
-  if (!problemId || !userId || !workspaceId || !['solved', 'partially_solved', 'not_solved', 'still_confused'].includes(response)) {
+  if (!problemId || !userId) {
     return null;
   }
 
-  const docId = `${problemId}_${userId}`;
-  const currentFeedbacks = getLocalItems(LOCAL_STORAGE_FEEDBACK_PREFIX, problemId);
-  const updatedFeedbacks = [
-    ...currentFeedbacks.filter((f) => f.userId !== userId),
-    {
-      id: docId,
+  const normalized =
+    response?.toLowerCase() === 'still_confused'
+      ? 'NOT_SOLVED'
+      : response?.toUpperCase() || 'SOLVED';
+
+  // Identify poll ID if not provided
+  let effectivePollId = pollId;
+  if (!effectivePollId) {
+    let prob = null;
+    if (db) {
+      try {
+        const pSnap = await getDoc(doc(db, 'problems', problemId));
+        if (pSnap.exists()) prob = pSnap.data();
+      } catch {}
+    }
+    if (!prob && workspaceId) {
+      const local = getLocalProblems(workspaceId);
+      prob = local.find((p) => p.id === problemId);
+    }
+    effectivePollId = prob?.currentPollId || `${problemId}_c${prob?.resolutionCycle || 1}`;
+  }
+
+  try {
+    const result = await submitVerificationVote({
+      pollId: effectivePollId,
       problemId,
       workspaceId,
-      userId,
-      userName,
-      feedback: response,
-      response,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    },
-  ];
-  saveLocalItems(LOCAL_STORAGE_FEEDBACK_PREFIX, problemId, updatedFeedbacks);
+      option: normalized,
+      currentUser: { uid: userId, displayName: userName },
+      userProfile: userProfile || { fullName: userName },
+    });
 
-  // Calculate resolution metrics
-  const solvedCount = updatedFeedbacks.filter((f) => f.feedback === 'solved' || f.response === 'solved').length;
-  const partiallySolvedCount = updatedFeedbacks.filter((f) => f.feedback === 'partially_solved' || f.response === 'partially_solved').length;
-  const notSolvedCount = updatedFeedbacks.filter(
-    (f) => f.feedback === 'not_solved' || f.response === 'not_solved' || f.feedback === 'still_confused' || f.response === 'still_confused'
-  ).length;
-  const unresolvedCount = partiallySolvedCount + notSolvedCount;
-
-  // Retrieve current problem to inspect total affected user count
-  const localProblems = getLocalProblems(workspaceId);
-  const targetProblem = localProblems.find((p) => p.id === problemId);
-  const totalAffected = Math.max(
-    1,
-    Number(targetProblem?.affectedUserCount || targetProblem?.affectedUserIds?.length || updatedFeedbacks.length)
-  );
-
-  // STRICT RULE (Section 18):
-  // Even ONE unresolved response -> Reopened!
-  const shouldReopen = unresolvedCount > 0;
-  const nextStatus = shouldReopen ? 'reopened' : 'solved';
-
-  const verificationStats = {
-    solved: solvedCount,
-    partiallySolved: partiallySolvedCount,
-    notSolved: notSolvedCount,
-    unresolved: unresolvedCount,
-    total: totalAffected,
-  };
-
-  if (targetProblem) {
-    targetProblem.status = nextStatus;
-    targetProblem.isReopened = shouldReopen;
-    targetProblem.stillReportingCount = unresolvedCount;
-    targetProblem.verificationStats = verificationStats;
-    targetProblem.updatedAt = new Date().toISOString();
-    if (shouldReopen) {
-      targetProblem.reopenedAt = new Date().toISOString();
-    }
-    saveLocalProblems(workspaceId, localProblems);
+    return {
+      status: result.status,
+      isReopened: result.isReopened,
+      isFinalSolved: result.isFinalSolved,
+      stillReportingCount: result.unresolvedUsers?.length || 0,
+      verificationStats: result.metrics?.counts,
+      unresolvedUsers: result.unresolvedUsers || [],
+    };
+  } catch (err) {
+    console.warn('[UNSAID submitResolutionVerification Error]', err);
+    return null;
   }
-
-  if (db) {
-    try {
-      // 1. Save individual feedback doc
-      const feedbackDocRef = doc(db, 'problemFeedback', docId);
-      await setDoc(feedbackDocRef, {
-        problemId,
-        workspaceId,
-        userId,
-        userName,
-        feedback: response,
-        response,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-
-      // 2. Update problem status & reopening counts atomically
-      const probRef = doc(db, 'problems', problemId);
-      const updatePayload = {
-        status: nextStatus,
-        isReopened: shouldReopen,
-        stillReportingCount: unresolvedCount,
-        verificationStats,
-        updatedAt: serverTimestamp(),
-      };
-      if (shouldReopen) {
-        updatePayload.reopenedAt = serverTimestamp();
-      }
-      await updateDoc(probRef, updatePayload);
-    } catch (err) {
-      console.warn('[UNSAID Resolution Verification Write Error]', err);
-    }
-  }
-
-  return {
-    status: nextStatus,
-    isReopened: shouldReopen,
-    stillReportingCount: unresolvedCount,
-    verificationStats,
-    feedbacks: updatedFeedbacks,
-  };
 };
 

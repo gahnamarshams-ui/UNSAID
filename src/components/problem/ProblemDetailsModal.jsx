@@ -11,7 +11,6 @@ import {
   ShieldCheck,
   Link2,
   Flag,
-  HelpCircle,
   TrendingUp,
   Check,
   ChevronDown,
@@ -21,17 +20,18 @@ import {
   Lightbulb,
   Trash2,
   Users,
-  AlertTriangle,
 } from 'lucide-react';
 import { ModalShell } from '../ui/ModalShell';
 import { Button } from '../ui/Button';
 import { Badge } from '../ui/Badge';
 import { CommunityPollWidget } from '../poll/CommunityPollWidget';
+import { ResolutionVerificationPoll } from '../poll/ResolutionVerificationPoll';
 import { useAuth } from '../../hooks/useAuth';
 import { useIdentity } from '../../hooks/useIdentity';
 import { buildProblemActivityTimeline } from '../../utils/activityTimeline';
 import { subscribeToProblemPoll } from '../../services/pollService';
 import {
+  subscribeToProblem,
   updateProblemStatus,
   subscribeToProblemMessages,
   sendProblemMessage,
@@ -43,7 +43,6 @@ import {
   submitEscalationVote,
   subscribeToProblemFeedback,
   subscribeToProblemReports,
-  submitResolutionVerification,
   markProblemRecurring,
   markProblemThreadRead,
   deleteProblem,
@@ -89,7 +88,6 @@ export const ProblemDetailsModal = ({
   const [escalationVotes, setEscalationVotes] = useState([]);
   const [qualityFeedbacks, setQualityFeedbacks] = useState([]);
   const [reporters, setReporters] = useState([]);
-  const [verifyingResolution, setVerifyingResolution] = useState(false);
   const [activeTab, setActiveTab] = useState('discussion'); // 'discussion' | 'poll' | 'activity'
 
   // 3. Official Resolution Form State (Admin)
@@ -112,6 +110,17 @@ export const ProblemDetailsModal = ({
   // Real-time Firestore Subscriptions for this problem
   useEffect(() => {
     if (!isOpen || !problem?.id) return;
+
+    const unsubProblem = subscribeToProblem(
+      problem.id,
+      (liveProb) => {
+        if (liveProb) {
+          setLocalProblem((prev) => ({ ...prev, ...liveProb }));
+          if (onProblemUpdated) onProblemUpdated(liveProb);
+        }
+      },
+      (err) => console.warn('[UNSAID Problem Live Sync Error]', err)
+    );
 
     const unsubMessages = subscribeToProblemMessages(
       problem.id,
@@ -154,6 +163,7 @@ export const ProblemDetailsModal = ({
     markProblemThreadRead(problem.id, viewerRole);
 
     return () => {
+      unsubProblem();
       unsubMessages();
       unsubPoll();
       unsubAcks();
@@ -161,7 +171,7 @@ export const ProblemDetailsModal = ({
       unsubFeedback();
       unsubReporters();
     };
-  }, [isOpen, problem?.id, userProfile?.role]);
+  }, [isOpen, problem?.id, userProfile?.role, onProblemUpdated]);
 
   // Scroll to bottom of message thread on new message
   useEffect(() => {
@@ -372,16 +382,21 @@ export const ProblemDetailsModal = ({
         adminUser: currentUser,
         adminProfile: userProfile,
       });
+      const nextCycle = (Number(problem.resolutionCycle) || 0) + 1;
       const updated = {
         ...problem,
-        status: 'solved',
+        status: 'awaiting_verification',
+        resolutionPendingVerification: true,
+        isReopened: false,
+        resolutionCycle: nextCycle,
+        currentPollId: `${problem.id}_c${nextCycle}`,
         officialResolution: resolution,
       };
       setProblem(updated);
       setShowResolutionForm(false);
       setResolutionText('');
       setResolutionActionTaken('');
-      if (onStatusChanged) onStatusChanged(problem.id, 'solved');
+      if (onStatusChanged) onStatusChanged(problem.id, 'awaiting_verification');
       if (onProblemUpdated) onProblemUpdated(updated);
     } catch (err) {
       console.error('[UNSAID Broadcast Resolution Error]', err);
@@ -445,48 +460,6 @@ export const ProblemDetailsModal = ({
       });
     } catch (err) {
       console.error('[UNSAID Vote Escalation Error]', err);
-    }
-  };
-
-  // 5. Quality Feedback / Resolution Verification Post-Resolution (100% agreement requirement)
-  const userFeedback = currentUser?.uid
-    ? qualityFeedbacks.find((f) => f.userId === currentUser.uid)?.feedback || null
-    : null;
-  const solvedCount = qualityFeedbacks.filter((f) => f.feedback === 'solved').length;
-  const partiallySolvedCount = qualityFeedbacks.filter((f) => f.feedback === 'partially_solved').length;
-  const notSolvedCount = qualityFeedbacks.filter((f) => f.feedback === 'not_solved' || f.feedback === 'still_confused').length;
-
-  const handleQualityFeedback = async (rating) => {
-    if (!currentUser?.uid || verifyingResolution) return;
-    setVerifyingResolution(true);
-    try {
-      const normalizedRating = rating === 'still_confused' ? 'not_solved' : rating;
-      const result = await submitResolutionVerification({
-        problemId: problem.id,
-        workspaceId: workspace?.id || problem.workspaceId,
-        userId: currentUser.uid,
-        userName: isAnonymous ? pseudonym : (userProfile?.displayName || currentUser?.displayName || 'Member'),
-        response: normalizedRating,
-      });
-
-      if (result) {
-        const updated = {
-          ...problem,
-          status: result.status,
-          stillReportingCount: result.stillReportingCount,
-          verificationStats: result.stats,
-          isReopened: result.status === 'reopened',
-        };
-        setProblem(updated);
-        if (onProblemUpdated) onProblemUpdated(updated);
-        if (result.status === 'reopened' && onStatusChanged) {
-          onStatusChanged(problem.id, 'reopened');
-        }
-      }
-    } catch (err) {
-      console.error('[UNSAID Quality Feedback Error]', err);
-    } finally {
-      setVerifyingResolution(false);
     }
   };
 
@@ -725,6 +698,10 @@ export const ProblemDetailsModal = ({
               {isSolved ? (
                 <Badge variant="low" size="sm" dot>
                   SOLVED
+                </Badge>
+              ) : problem.status === 'awaiting_verification' ? (
+                <Badge variant="cyan" size="sm" dot>
+                  AWAITING VERIFICATION
                 </Badge>
               ) : problem.status === 'reopened' ? (
                 <Badge variant="high" size="sm" dot>
@@ -1264,106 +1241,21 @@ export const ProblemDetailsModal = ({
         {/* ========================================================= */}
         {/* RESOLUTION VERIFICATION POLL (100% AGREEMENT REQUIRED)   */}
         {/* ========================================================= */}
-        {(isSolved || problem.status === 'reopened' || problem.verificationStats) && (
-          <div className="p-4 rounded-2xl bg-[var(--surface)] border border-[var(--glass-border)] space-y-3.5">
-            <div className="flex items-center justify-between flex-wrap gap-2">
-              <div className="flex items-center gap-1.5">
-                <HelpCircle className="w-4 h-4 text-[var(--cyan)]" />
-                <span className="text-xs font-bold text-[var(--text)]">
-                  Resolution Verification Poll
-                </span>
-                <Badge variant={problem.status === 'reopened' ? 'high' : 'low'} size="xs">
-                  {problem.status === 'reopened' ? 'Reopened' : 'Pending Verification'}
-                </Badge>
-              </div>
-              <span className="text-[11px] text-[var(--text-muted)] font-mono">
-                🟢 {solvedCount} Solved · 🟡 {partiallySolvedCount} Partially · 🔴 {notSolvedCount} Unresolved
-              </span>
-            </div>
-
-            {/* Reopening Warning Banner if problem has unresolved reports */}
-            {problem.status === 'reopened' && (
-              <div className="p-3 rounded-xl bg-[var(--danger-light)]/40 border border-[var(--danger)]/30 text-xs flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 text-[var(--danger)]">
-                  <AlertTriangle className="w-4 h-4 shrink-0" />
-                  <span>
-                    <strong>Reopened:</strong> {problem.stillReportingCount || 1} of {problem.affectedUserCount || reporters.length || 1} affected users still reporting this issue unresolved.
-                  </span>
-                </div>
-                <Badge variant="high" size="xs">
-                  Active in Triage
-                </Badge>
-              </div>
-            )}
-
-            <div className="p-2.5 rounded-xl bg-[var(--surface-hover)] border border-[var(--glass-border)] text-[11px] text-[var(--text-secondary)] space-y-1">
-              <div className="flex items-center justify-between">
-                <strong className="text-[var(--text)]">100% Confirmation Policy:</strong>
-                <span className="text-[10px] text-[var(--text-muted)]">
-                  Total Affected: {problem.affectedUserCount || reporters.length || 1}
-                </span>
-              </div>
-              <p>
-                UNSAID requires every affected community member to confirm &quot;Solved&quot;. If any member reports &quot;Partially Solved&quot; or &quot;Not Solved&quot;, this issue automatically reopens and returns to the active admin queue.
-              </p>
-            </div>
-
-            <p className="text-xs font-semibold text-[var(--text)]">
-              Is this problem solved for you?
-            </p>
-
-            {userFeedback && (
-              <p className="text-[11px] text-[var(--text)] font-medium">
-                Your submitted response:{' '}
-                <strong className={userFeedback === 'solved' ? 'text-[var(--success)]' : 'text-[var(--danger)]'}>
-                  {userFeedback === 'solved'
-                    ? '✓ Solved'
-                    : userFeedback === 'partially_solved'
-                    ? '🟡 Partially Solved'
-                    : '🔴 Not Solved'}
-                </strong>
-              </p>
-            )}
-
-            <div className="grid grid-cols-3 gap-2">
-              <button
-                type="button"
-                onClick={() => handleQualityFeedback('solved')}
-                disabled={verifyingResolution}
-                className={`py-2 px-3 rounded-xl text-xs font-semibold border transition-all cursor-pointer text-center ${
-                  userFeedback === 'solved'
-                    ? 'bg-[var(--success-light)] border-[var(--success)] text-[var(--success)] shadow-xs font-bold'
-                    : 'bg-[var(--surface-hover)] hover:bg-[var(--glass-hover)] border-[var(--glass-border)] text-[var(--text)]'
-                }`}
-              >
-                🟢 Solved
-              </button>
-              <button
-                type="button"
-                onClick={() => handleQualityFeedback('partially_solved')}
-                disabled={verifyingResolution}
-                className={`py-2 px-3 rounded-xl text-xs font-semibold border transition-all cursor-pointer text-center ${
-                  userFeedback === 'partially_solved'
-                    ? 'bg-[var(--warning-light)] border-[var(--warning)] text-[var(--warning)] shadow-xs font-bold'
-                    : 'bg-[var(--surface-hover)] hover:bg-[var(--glass-hover)] border-[var(--glass-border)] text-[var(--text)]'
-                }`}
-              >
-                🟡 Partially Solved
-              </button>
-              <button
-                type="button"
-                onClick={() => handleQualityFeedback('not_solved')}
-                disabled={verifyingResolution}
-                className={`py-2 px-3 rounded-xl text-xs font-semibold border transition-all cursor-pointer text-center ${
-                  userFeedback === 'not_solved' || userFeedback === 'still_confused'
-                    ? 'bg-[var(--danger-light)] border-[var(--danger)] text-[var(--danger)] shadow-xs font-bold'
-                    : 'bg-[var(--surface-hover)] hover:bg-[var(--glass-hover)] border-[var(--glass-border)] text-[var(--text)]'
-                }`}
-              >
-                🔴 Not Solved
-              </button>
-            </div>
-          </div>
+        {(isSolved || problem.status === 'awaiting_verification' || problem.status === 'reopened' || problem.officialResolution || problem.currentPollId) && (
+          <ResolutionVerificationPoll
+            problem={problem}
+            workspaceId={workspace?.id || problem.workspaceId}
+            currentUser={currentUser}
+            userProfile={userProfile}
+            isAdmin={isAdmin}
+            onStatusChanged={(id, newStatus) => {
+              if (onStatusChanged) onStatusChanged(id, newStatus);
+            }}
+            onProblemUpdated={(updated) => {
+              setProblem(updated);
+              if (onProblemUpdated) onProblemUpdated(updated);
+            }}
+          />
         )}
 
         {/* ========================================================= */}

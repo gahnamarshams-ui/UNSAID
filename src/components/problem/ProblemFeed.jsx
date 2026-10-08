@@ -39,6 +39,16 @@ export const ProblemFeed = ({
   const [upvotingId, setUpvotingId] = useState(null);
   const [selectedProblem, setSelectedProblem] = useState(null);
 
+  // Synchronize selectedProblem when problems update via real-time Firestore feed
+  React.useEffect(() => {
+    if (selectedProblem?.id && problems?.length > 0) {
+      const fresh = problems.find((p) => p.id === selectedProblem.id);
+      if (fresh && fresh !== selectedProblem) {
+        setSelectedProblem(fresh);
+      }
+    }
+  }, [problems, selectedProblem]);
+
   // Delete State
   const [problemToDelete, setProblemToDelete] = useState(null);
   const [deletingProblem, setDeletingProblem] = useState(false);
@@ -80,7 +90,7 @@ export const ProblemFeed = ({
       }
 
       // Status filtering
-      if (statusFilter === 'open' && prob.status !== 'open') return false;
+      if (statusFilter === 'open' && prob.status === 'solved') return false;
       if (statusFilter === 'solved' && prob.status !== 'solved') return false;
       if (statusFilter === 'emergency' && !prob.isEmergency) return false;
 
@@ -393,10 +403,26 @@ export const ProblemFeed = ({
                       </span>
                     )}
                     <Badge
-                      variant={prob.status === 'solved' ? 'low' : isEmergency ? 'high' : prob.status === 'reopened' ? 'warning' : 'medium'}
+                      variant={
+                        prob.status === 'solved'
+                          ? 'low'
+                          : prob.status === 'awaiting_verification'
+                          ? 'cyan'
+                          : prob.status === 'reopened'
+                          ? 'high'
+                          : isEmergency
+                          ? 'high'
+                          : 'medium'
+                      }
                       size="sm"
                     >
-                      {prob.status === 'solved' ? 'SOLVED' : prob.status === 'reopened' ? 'REOPENED' : 'OPEN'}
+                      {prob.status === 'solved'
+                        ? 'SOLVED'
+                        : prob.status === 'awaiting_verification'
+                        ? 'AWAITING VERIFICATION'
+                        : prob.status === 'reopened'
+                        ? 'REOPENED'
+                        : 'OPEN'}
                     </Badge>
                   </div>
                 </div>

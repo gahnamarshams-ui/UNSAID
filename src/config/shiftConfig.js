@@ -9,9 +9,9 @@
 
 export const DEFAULT_SHIFT_CONFIG = {
   shiftStart: '06:00', // 24-hr format HH:MM
-  shiftEnd: '18:00',
+  shiftEnd: '22:00',
   activeShiftStart: '06:00',
-  activeShiftEnd: '18:00',
+  activeShiftEnd: '22:00',
   timezone: 'auto',
   labelActive: 'ACTIVE SHIFT',
   labelOffHours: 'OFF HOURS',
@@ -27,7 +27,7 @@ export const parseTimeToMinutes = (timeStr) => {
 };
 
 /**
- * Converts 24-hour HH:MM string to 12-hour AM/PM format (e.g. "06:00" -> "06:00 AM", "18:00" -> "06:00 PM").
+ * Converts 24-hour HH:MM string to 12-hour AM/PM format (e.g. "06:00" -> "06:00 AM", "22:00" -> "10:00 PM").
  */
 export const formatTimeTo12Hour = (timeStr) => {
   if (!timeStr || typeof timeStr !== 'string') return 'N/A';
@@ -41,6 +41,13 @@ export const formatTimeTo12Hour = (timeStr) => {
 
 /**
  * Evaluates whether the current local/workspace time falls inside the active shift.
+ * 
+ * Exact boundary rules:
+ *   05:59 AM (359 min) -> OFF-HOURS
+ *   06:00 AM (360 min) -> ON-HOURS
+ *   09:59 PM (1319 min) -> ON-HOURS
+ *   10:00 PM (1320 min) -> ON-HOURS
+ *   10:01 PM (1321 min) -> OFF-HOURS
  * 
  * @param {Object} [customConfig] Optional workspace-specific shift config
  * @param {Date} [referenceDate] Optional reference date for testing
@@ -71,16 +78,47 @@ export const getShiftStatus = (customConfig = null, referenceDate = new Date()) 
   const startMinutes = parseTimeToMinutes(config.shiftStart);
   const endMinutes = parseTimeToMinutes(config.shiftEnd);
 
-  const currentMinutes = referenceDate.getHours() * 60 + referenceDate.getMinutes();
+  // Timezone-safe hour and minute resolution
+  let currentHours = referenceDate.getHours();
+  let currentMinutesVal = referenceDate.getMinutes();
+
+  if (config.timezone && config.timezone !== 'auto') {
+    try {
+      const formatter = new Intl.DateTimeFormat('en-US', {
+        timeZone: config.timezone,
+        hour: 'numeric',
+        minute: 'numeric',
+        hour12: false,
+      });
+      const parts = formatter.formatToParts(referenceDate);
+      const hPart = parts.find((p) => p.type === 'hour');
+      const mPart = parts.find((p) => p.type === 'minute');
+      if (hPart && mPart) {
+        currentHours = parseInt(hPart.value, 10);
+        if (currentHours === 24) currentHours = 0;
+        currentMinutesVal = parseInt(mPart.value, 10);
+      }
+    } catch {
+      currentHours = referenceDate.getHours();
+      currentMinutesVal = referenceDate.getMinutes();
+    }
+  }
+
+  const currentMinutes = currentHours * 60 + currentMinutesVal;
 
   let isShiftActive = false;
 
   if (startMinutes < endMinutes) {
-    // Normal daytime shift (e.g. 06:00 -> 18:00)
-    isShiftActive = currentMinutes >= startMinutes && currentMinutes < endMinutes;
+    // Normal daytime shift (06:00 -> 22:00)
+    // 05:59 AM (359) is false (OFF-HOURS)
+    // 06:00 AM (360) is true (ON-HOURS)
+    // 09:59 PM (1319) is true (ON-HOURS)
+    // 10:00 PM (1320) is true (ON-HOURS)
+    // 10:01 PM (1321) is false (OFF-HOURS)
+    isShiftActive = currentMinutes >= startMinutes && currentMinutes <= endMinutes;
   } else if (startMinutes > endMinutes) {
-    // Overnight shift (e.g. 20:00 -> 06:00)
-    isShiftActive = currentMinutes >= startMinutes || currentMinutes < endMinutes;
+    // Overnight shift (e.g. 22:01 -> 05:59)
+    isShiftActive = currentMinutes >= startMinutes || currentMinutes <= endMinutes;
   } else {
     // Start equals end: 24/7 active
     isShiftActive = true;
