@@ -3,6 +3,7 @@ import {
   collection,
   doc,
   getDoc,
+  setDoc,
   getDocs,
   addDoc,
   updateDoc,
@@ -19,6 +20,7 @@ import { db } from '../config/firebase';
 import { useAuth } from '../hooks/useAuth';
 import { DEFAULT_INVITE_EXPIRY_DAYS } from '../config/appConfig';
 import { generateSecureToken } from '../utils/security';
+import { sanitizeWorkspaceProfileData } from '../utils/identityProfile';
 import { WorkspaceContext } from './workspaceContextDef';
 import {
   subscribeToPendingWorkspaceRequests,
@@ -851,6 +853,114 @@ export const WorkspaceProvider = ({ children }) => {
     return true;
   };
 
+  // Update workspace-scoped professional / academic identity profile for current user
+  const updateWorkspaceMemberProfile = async (profileFields, targetWorkspaceId = null) => {
+    if (!currentUserId) {
+      throw new Error('User is not authenticated.');
+    }
+    if (!db) {
+      throw new Error('Database service is not configured.');
+    }
+
+    const wsId = targetWorkspaceId || currentWorkspace?.id;
+    if (!wsId) {
+      throw new Error('No active workspace selected.');
+    }
+
+    const safeFields = sanitizeWorkspaceProfileData(profileFields);
+    if (!safeFields.professionalRole) {
+      throw new Error('Professional or Academic role is required.');
+    }
+
+    const existingMem = memberships.find((m) => m.workspaceId === wsId);
+    const memberDocId = existingMem?.id || `${currentUserId}_${wsId}`;
+    const memberDocRef = doc(db, 'workspaceMembers', memberDocId);
+
+    // Maintain existing permission role strictly intact
+    const permissionRole = existingMem?.role || (isAdmin ? 'admin' : 'member');
+
+    const updateFields = {
+      ...safeFields,
+      profileCompleted: true,
+      updatedAt: serverTimestamp(),
+    };
+
+    let writeSucceeded = false;
+    // 1. If membership is known in local state, updateDoc is the fastest and safest path
+    if (existingMem) {
+      try {
+        await withTimeout(updateDoc(memberDocRef, updateFields), 8000);
+        writeSucceeded = true;
+      } catch (updateErr) {
+        // If document is not found on remote Firestore, fallback to creation
+        if (updateErr?.code === 'not-found') {
+          writeSucceeded = false;
+        } else {
+          throw updateErr;
+        }
+      }
+    }
+
+    // 2. If not already written, check Firestore document existence
+    if (!writeSucceeded) {
+      const memberSnap = await withTimeout(getDoc(memberDocRef), 4000).catch(() => null);
+      if (memberSnap?.exists()) {
+        await withTimeout(updateDoc(memberDocRef, updateFields), 8000);
+      } else {
+        // Document does not exist: create with full valid schema, preserving strict permission role
+        const createPayload = {
+          userId: currentUserId,
+          workspaceId: wsId,
+          role: permissionRole,
+          status: 'active',
+          joinedAt: serverTimestamp(),
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+          profileCompleted: true,
+          ...safeFields,
+        };
+        await withTimeout(setDoc(memberDocRef, createPayload, { merge: true }), 8000);
+      }
+    }
+
+    console.log('[Profile] State updated (local)');
+
+    // Update local React state immediately so UI updates instantaneously without full page reload
+    setMemberships((prev) => {
+      const exists = prev.some((m) => m.workspaceId === wsId && m.userId === currentUserId);
+      if (exists) {
+        return prev.map((m) =>
+          m.workspaceId === wsId && m.userId === currentUserId
+            ? { ...m, ...safeFields, role: permissionRole, status: 'active', profileCompleted: true, updatedAt: new Date() }
+            : m
+        );
+      }
+      return [
+        ...prev,
+        {
+          id: memberDocId,
+          userId: currentUserId,
+          workspaceId: wsId,
+          role: permissionRole,
+          status: 'active',
+          ...safeFields,
+          profileCompleted: true,
+          updatedAt: new Date(),
+        },
+      ];
+    });
+
+    return {
+      id: memberDocId,
+      userId: currentUserId,
+      workspaceId: wsId,
+      role: permissionRole,
+      status: 'active',
+      ...safeFields,
+      profileCompleted: true,
+    };
+  };
+
   // Derive user's membership and role in the currently selected workspace
   const currentMembership = React.useMemo(() => {
     if (!currentWorkspace?.id || !currentUserId) return null;
@@ -977,6 +1087,7 @@ export const WorkspaceProvider = ({ children }) => {
     getUserRequestForWorkspace,
     getWorkspaceRequests,
     reviewJoinRequest,
+    updateWorkspaceMemberProfile,
     refreshWorkspaces: loadWorkspaces,
   };
 

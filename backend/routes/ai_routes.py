@@ -137,6 +137,15 @@ def handle_analyze_problem():
         is_emergency,
     )
 
+    user_context = body.get("userContext")
+    safe_user_context = None
+    if isinstance(user_context, dict):
+        safe_user_context = {}
+        for key in ["role", "professionalRole", "department", "year", "course", "institution", "organization", "designation"]:
+            val = str(user_context.get(key, "")).strip()
+            if val:
+                safe_user_context[key] = val[:100]
+
     try:
         analysis = analyze_problem(
             title=title,
@@ -147,6 +156,7 @@ def handle_analyze_problem():
             workaround=workaround,
             is_emergency=is_emergency,
             recent_candidates=candidate_problems if isinstance(candidate_problems, list) else None,
+            user_context=safe_user_context if safe_user_context else None,
         )
 
         logger.info("AI analyze-problem success for user=%s", g.user.get("uid"))

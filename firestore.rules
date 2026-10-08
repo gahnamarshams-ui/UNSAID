@@ -161,19 +161,41 @@ service cloud.firestore {
     // Membership creation is admin-only and happens together with request approval.
     match /workspaceMembers/{memberId} {
       allow read: if isAuthenticated() && (
-        resource == null || resource.data.userId == request.auth.uid || isWorkspaceAdmin(resource.data.workspaceId)
+        resource == null ||
+        resource.data.userId == request.auth.uid ||
+        isWorkspaceAdmin(resource.data.workspaceId) ||
+        isWorkspaceMember(resource.data.workspaceId)
       );
-      allow create: if isWorkspaceAdmin(request.resource.data.workspaceId) &&
+      allow create: if (
+        isWorkspaceAdmin(request.resource.data.workspaceId) &&
         request.resource.data.userId is string &&
         request.resource.data.role in ['admin', 'member'] &&
         request.resource.data.status == 'active' &&
-        memberId == request.resource.data.userId + '_' + request.resource.data.workspaceId;
+        memberId == request.resource.data.userId + '_' + request.resource.data.workspaceId
+      ) || (
+        isAuthenticated() &&
+        request.resource.data.userId == request.auth.uid &&
+        memberId == request.auth.uid + '_' + request.resource.data.workspaceId &&
+        request.resource.data.role == 'member' &&
+        request.resource.data.status == 'active' &&
+        hasActiveWorkspace(request.resource.data.workspaceId) &&
+        (
+          !exists(/databases/$(database)/documents/workspaceRequests/$(request.auth.uid + '_' + request.resource.data.workspaceId)) ||
+          get(/databases/$(database)/documents/workspaceRequests/$(request.auth.uid + '_' + request.resource.data.workspaceId)).data.status == 'approved'
+        )
+      );
       allow update: if (isWorkspaceAdmin(resource.data.workspaceId) &&
         request.resource.data.userId == resource.data.userId &&
         request.resource.data.workspaceId == resource.data.workspaceId) || (
         isAuthenticated() &&
         isOwner(resource.data.userId) &&
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastSeenAt', 'updatedAt'])
+        request.resource.data.userId == resource.data.userId &&
+        request.resource.data.workspaceId == resource.data.workspaceId &&
+        (!('role' in resource.data) || request.resource.data.role == resource.data.role) &&
+        (!('status' in resource.data) || request.resource.data.status == resource.data.status) &&
+        (!request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          'userId', 'workspaceId', 'role', 'status', 'joinedAt', 'createdAt'
+        ]))
       );
       allow delete: if isWorkspaceAdmin(resource.data.workspaceId) || (isAuthenticated() && resource.data.userId == request.auth.uid);
     }
@@ -215,7 +237,7 @@ service cloud.firestore {
            (('createdBy' in resource.data) && isOwner(resource.data.createdBy)) ||
            (('authorEmail' in resource.data) && resource.data.authorEmail != '' && resource.data.authorEmail == request.auth.token.email))) &&
           !request.resource.data.diff(resource.data).affectedKeys().hasAny(['workspaceId', 'authorId', 'createdBy'])) ||
-        // Community interaction: members can update upvotes, acknowledgements, escalation votes, quality feedback, recurrence, and read state
+        // Community interaction: members can update upvotes, acknowledgements, escalation votes, quality feedback, recurrence, affected users, and verification state
         (isWorkspaceMember(resource.data.workspaceId) &&
          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
            'upvotesCount', 'upvotedBy',
@@ -223,6 +245,7 @@ service cloud.firestore {
            'escalationVotes',
            'qualityFeedback',
            'isRecurring', 'recurringCount', 'linkedProblemId', 'linkedProblemTitle',
+           'affectedUserCount', 'affectedUserIds', 'stillReportingCount', 'resolutionPendingVerification', 'verificationStats', 'isReopened', 'reopenedAt', 'status',
            'updatedAt',
            'readByAdmin', 'readByUser'
          ]))
@@ -408,5 +431,23 @@ service cloud.firestore {
         resource.data.userId == request.auth.uid
       );
     }
+
+    // 15. Problem Reports Collection (Affected Users per Problem)
+    // Deterministic doc ID: {problemId}_{userId}. Strictly prevents duplicate records for the same problem & user.
+    match /problemReports/{reportId} {
+      allow read: if isAuthenticated() && (
+        isAdmin() ||
+        isWorkspaceMember(resource.data.workspaceId)
+      );
+      allow create: if isAuthenticated() &&
+        request.resource.data.userId == request.auth.uid &&
+        reportId == request.resource.data.problemId + '_' + request.auth.uid &&
+        (isAdmin() || isWorkspaceMember(request.resource.data.workspaceId));
+      allow update: if isAuthenticated() &&
+        (isAdmin() || isWorkspaceAdmin(resource.data.workspaceId) || resource.data.userId == request.auth.uid);
+      allow delete: if isAuthenticated() &&
+        (isAdmin() || isWorkspaceAdmin(resource.data.workspaceId) || resource.data.userId == request.auth.uid);
+    }
   }
 }
+

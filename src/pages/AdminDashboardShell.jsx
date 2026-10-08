@@ -21,6 +21,7 @@ import { WorkspaceRequestsModal } from '../components/workspace/WorkspaceRequest
 import { ProblemDetailsModal } from '../components/problem/ProblemDetailsModal';
 import { QueryTriageWorkspace } from '../components/triage/QueryTriageWorkspace';
 import { AdminAISummaryModal } from '../components/triage/AdminAISummaryModal';
+import { WorkspaceProfilePrompt } from '../components/workspace/WorkspaceProfilePrompt';
 import { OfflineBanner } from '../components/common/OfflineBanner';
 import { subscribeToWorkspaceProblems } from '../services/problemService';
 
@@ -31,7 +32,7 @@ import { subscribeToWorkspaceProblems } from '../services/problemService';
  */
 export const AdminDashboardShell = () => {
   const { currentUser, userProfile } = useAuth();
-  const { currentWorkspace, pendingRequests, pendingRequestsCount } = useWorkspace();
+  const { currentWorkspace, currentMembership, pendingRequests, pendingRequestsCount } = useWorkspace();
   const [inviteModalOpen, setInviteModalOpen] = useState(false);
   const [requestsModalOpen, setRequestsModalOpen] = useState(false);
   const [aiSummaryModalOpen, setAiSummaryModalOpen] = useState(false);
@@ -175,6 +176,12 @@ export const AdminDashboardShell = () => {
                 <Badge variant="cyan" size="xs">
                   Workspace Administrator
                 </Badge>
+                {currentMembership?.professionalRole && (
+                  <Badge variant="primary" size="xs">
+                    {currentMembership.professionalRole}
+                    {currentMembership.department ? ` · ${currentMembership.department}` : ''}
+                  </Badge>
+                )}
               </div>
               {currentUser?.email && (
                 <span className="text-xs text-[var(--text-muted)] font-mono mt-0.5">
@@ -196,6 +203,9 @@ export const AdminDashboardShell = () => {
           </div>
         </div>
       )}
+
+      {/* Subtle Workspace Profile Completion Prompt */}
+      <WorkspaceProfilePrompt />
 
       {/* Real-time Join Requests Alert Banner for Admin */}
       {pendingRequestsCount > 0 && (

@@ -20,6 +20,8 @@ import {
   Lock,
   Lightbulb,
   Trash2,
+  Users,
+  AlertTriangle,
 } from 'lucide-react';
 import { ModalShell } from '../ui/ModalShell';
 import { Button } from '../ui/Button';
@@ -40,7 +42,8 @@ import {
   subscribeToEscalationVotes,
   submitEscalationVote,
   subscribeToProblemFeedback,
-  submitQualityFeedback,
+  subscribeToProblemReports,
+  submitResolutionVerification,
   markProblemRecurring,
   markProblemThreadRead,
   deleteProblem,
@@ -84,6 +87,8 @@ export const ProblemDetailsModal = ({
   const [acknowledgements, setAcknowledgements] = useState([]);
   const [escalationVotes, setEscalationVotes] = useState([]);
   const [qualityFeedbacks, setQualityFeedbacks] = useState([]);
+  const [reporters, setReporters] = useState([]);
+  const [verifyingResolution, setVerifyingResolution] = useState(false);
   const [activeTab, setActiveTab] = useState('discussion'); // 'discussion' | 'poll' | 'activity'
 
   // 3. Official Resolution Form State (Admin)
@@ -137,6 +142,12 @@ export const ProblemDetailsModal = ({
       (err) => console.warn('[UNSAID Problem Details] Feedback sync notice:', err)
     );
 
+    const unsubReporters = subscribeToProblemReports(
+      problem.id,
+      (list) => setReporters(list),
+      (err) => console.warn('[UNSAID Problem Details] Reporters sync notice:', err)
+    );
+
     // Mark thread as read for the active viewer
     const viewerRole = userProfile?.role === 'admin' ? 'admin' : 'member';
     markProblemThreadRead(problem.id, viewerRole);
@@ -147,6 +158,7 @@ export const ProblemDetailsModal = ({
       unsubAcks();
       unsubVotes();
       unsubFeedback();
+      unsubReporters();
     };
   }, [isOpen, problem?.id, userProfile?.role]);
 
@@ -386,25 +398,45 @@ export const ProblemDetailsModal = ({
     }
   };
 
-  // 5. Quality Feedback Post-Resolution
+  // 5. Quality Feedback / Resolution Verification Post-Resolution (100% agreement requirement)
   const userFeedback = currentUser?.uid
     ? qualityFeedbacks.find((f) => f.userId === currentUser.uid)?.feedback || null
     : null;
   const solvedCount = qualityFeedbacks.filter((f) => f.feedback === 'solved').length;
   const partiallySolvedCount = qualityFeedbacks.filter((f) => f.feedback === 'partially_solved').length;
-  const stillConfusedCount = qualityFeedbacks.filter((f) => f.feedback === 'still_confused').length;
+  const notSolvedCount = qualityFeedbacks.filter((f) => f.feedback === 'not_solved' || f.feedback === 'still_confused').length;
 
   const handleQualityFeedback = async (rating) => {
-    if (!currentUser?.uid) return;
+    if (!currentUser?.uid || verifyingResolution) return;
+    setVerifyingResolution(true);
     try {
-      await submitQualityFeedback({
+      const normalizedRating = rating === 'still_confused' ? 'not_solved' : rating;
+      const result = await submitResolutionVerification({
         problemId: problem.id,
         workspaceId: workspace?.id || problem.workspaceId,
         userId: currentUser.uid,
-        feedback: rating,
+        userName: isAnonymous ? pseudonym : (userProfile?.displayName || currentUser?.displayName || 'Member'),
+        response: normalizedRating,
       });
+
+      if (result) {
+        const updated = {
+          ...problem,
+          status: result.status,
+          stillReportingCount: result.stillReportingCount,
+          verificationStats: result.stats,
+          isReopened: result.status === 'reopened',
+        };
+        setProblem(updated);
+        if (onProblemUpdated) onProblemUpdated(updated);
+        if (result.status === 'reopened' && onStatusChanged) {
+          onStatusChanged(problem.id, 'reopened');
+        }
+      }
     } catch (err) {
       console.error('[UNSAID Quality Feedback Error]', err);
+    } finally {
+      setVerifyingResolution(false);
     }
   };
 
@@ -617,7 +649,7 @@ export const ProblemDetailsModal = ({
         {/* ========================================================= */}
         {/* META HEADER GRID                                          */}
         {/* ========================================================= */}
-        <div className="p-4 rounded-2xl bg-[var(--surface)] border border-[var(--glass-border)] grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+        <div className="p-4 rounded-2xl bg-[var(--surface)] border border-[var(--glass-border)] grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs">
           <div>
             <span className="text-[10px] uppercase font-semibold text-[var(--text-muted)] block">
               Priority
@@ -628,8 +660,8 @@ export const ProblemDetailsModal = ({
                   EMERGENCY
                 </Badge>
               ) : (
-                <Badge variant="medium" size="sm">
-                  Normal
+                <Badge variant={problem.priority === 'High' ? 'high' : problem.priority === 'Medium' ? 'medium' : 'low'} size="sm">
+                  {problem.priority || 'Normal'}
                 </Badge>
               )}
             </div>
@@ -644,12 +676,31 @@ export const ProblemDetailsModal = ({
                 <Badge variant="low" size="sm" dot>
                   SOLVED
                 </Badge>
+              ) : problem.status === 'reopened' ? (
+                <Badge variant="high" size="sm" dot>
+                  REOPENED
+                </Badge>
               ) : (
                 <Badge variant="warning" size="sm" dot>
                   OPEN
                 </Badge>
               )}
             </div>
+          </div>
+
+          <div>
+            <span className="text-[10px] uppercase font-semibold text-[var(--text-muted)] block">
+              Affected Users
+            </span>
+            <div className="mt-1 flex items-center gap-1.5 font-bold text-[var(--primary)]">
+              <Users className="w-3.5 h-3.5 text-[var(--cyan)]" />
+              <span>{problem.affectedUserCount || reporters.length || 1} people</span>
+            </div>
+            {problem.stillReportingCount > 0 && (
+              <span className="text-[10px] text-[var(--danger)] font-semibold block mt-0.5">
+                ⚠️ {problem.stillReportingCount} still reporting
+              </span>
+            )}
           </div>
 
           <div>
@@ -679,6 +730,33 @@ export const ProblemDetailsModal = ({
           </div>
         </div>
 
+        {/* Affected Community Reporters List */}
+        {reporters.length > 0 && (
+          <div className="p-3.5 rounded-2xl bg-[var(--surface)] border border-[var(--glass-border)] space-y-2 text-xs">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-[var(--text)] flex items-center gap-1.5">
+                <Users className="w-3.5 h-3.5 text-[var(--cyan)]" />
+                <span>Affected Community Members ({reporters.length})</span>
+              </span>
+              <span className="text-[10px] text-[var(--text-muted)]">
+                Aggregated into this single incident document
+              </span>
+            </div>
+            <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
+              {reporters.map((rep) => (
+                <span
+                  key={rep.id}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] bg-[var(--surface-hover)] border border-[var(--glass-border)] text-[var(--text)] font-medium"
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-[var(--cyan)]" />
+                  <span>{rep.userName || 'Member'}</span>
+                  {rep.isAnonymous && <span className="text-[10px] text-[var(--text-muted)] italic">(anon)</span>}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Confidential 1-on-1 Direct Thread Banner */}
         {problem.isConfidential && (
           <div className="p-3.5 rounded-2xl bg-[var(--primary)]/10 border border-[var(--primary)]/30 text-xs flex items-center gap-3">
@@ -696,6 +774,43 @@ export const ProblemDetailsModal = ({
             </div>
           </div>
         )}
+
+        {/* Reporter Identity Context Banner */}
+        <div className="p-3.5 rounded-2xl bg-[var(--surface)] border border-[var(--glass-border)] flex items-center justify-between flex-wrap gap-2 text-xs">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-full bg-[var(--surface-hover)] border border-[var(--glass-border)] flex items-center justify-center text-[var(--primary)] font-bold text-xs shrink-0">
+              {problem.isAnonymous ? '?' : (problem.authorName ? problem.authorName.charAt(0).toUpperCase() : 'M')}
+            </div>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="font-bold text-[var(--text)]">
+                  {problem.isAnonymous ? (problem.authorName || 'Anonymous Member') : (problem.authorName || 'Workspace Member')}
+                </span>
+                {problem.isAnonymous ? (
+                  <Badge variant="neutral" size="xs">Identity Protected</Badge>
+                ) : problem.authorIdentity?.professionalRole ? (
+                  <Badge variant="cyan" size="xs">
+                    {problem.authorIdentity.professionalRole}
+                    {problem.authorIdentity.year ? ` • ${problem.authorIdentity.year}` : ''}
+                  </Badge>
+                ) : null}
+              </div>
+              {!problem.isAnonymous && (problem.authorIdentity?.department || problem.authorIdentity?.institution || problem.authorIdentity?.organization) && (
+                <div className="text-[11px] text-[var(--text-muted)] flex items-center gap-1.5 flex-wrap mt-0.5">
+                  {problem.authorIdentity?.department && <span>{problem.authorIdentity.department}</span>}
+                  {problem.authorIdentity?.department && (problem.authorIdentity?.institution || problem.authorIdentity?.organization) && <span>•</span>}
+                  <span>{problem.authorIdentity?.institution || problem.authorIdentity?.organization}</span>
+                  {problem.authorIdentity?.course && <span>({problem.authorIdentity.course})</span>}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="text-[11px] text-[var(--text-muted)] flex items-center gap-1 font-mono">
+            <Clock className="w-3 h-3" />
+            <span>{formatTimestamp(problem.createdAt)}</span>
+          </div>
+        </div>
 
         {/* Title, Description & Workaround */}
         <div className="space-y-2">
@@ -985,41 +1100,74 @@ export const ProblemDetailsModal = ({
         )}
 
         {/* ========================================================= */}
-        {/* QUALITY FEEDBACK SECTION (WHEN RESOLVED / SOLVED)         */}
+        {/* RESOLUTION VERIFICATION POLL (100% AGREEMENT REQUIRED)   */}
         {/* ========================================================= */}
-        {isSolved && (
-          <div className="p-4 rounded-2xl bg-[var(--surface)] border border-[var(--glass-border)] space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-[var(--text)] flex items-center gap-1.5">
-                <HelpCircle className="w-3.5 h-3.5 text-[var(--cyan)]" />
-                Resolution Quality Feedback
-              </span>
-              <span className="text-[11px] text-[var(--text-muted)]">
-                🟢 {solvedCount} · 🟡 {partiallySolvedCount} · 🔴 {stillConfusedCount}
+        {(isSolved || problem.status === 'reopened' || problem.verificationStats) && (
+          <div className="p-4 rounded-2xl bg-[var(--surface)] border border-[var(--glass-border)] space-y-3.5">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-1.5">
+                <HelpCircle className="w-4 h-4 text-[var(--cyan)]" />
+                <span className="text-xs font-bold text-[var(--text)]">
+                  Resolution Verification Poll
+                </span>
+                <Badge variant={problem.status === 'reopened' ? 'high' : 'low'} size="xs">
+                  {problem.status === 'reopened' ? 'Reopened' : 'Pending Verification'}
+                </Badge>
+              </div>
+              <span className="text-[11px] text-[var(--text-muted)] font-mono">
+                🟢 {solvedCount} Solved · 🟡 {partiallySolvedCount} Partially · 🔴 {notSolvedCount} Unresolved
               </span>
             </div>
 
+            {/* Reopening Warning Banner if problem has unresolved reports */}
+            {problem.status === 'reopened' && (
+              <div className="p-3 rounded-xl bg-[var(--danger-light)]/40 border border-[var(--danger)]/30 text-xs flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-[var(--danger)]">
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  <span>
+                    <strong>Reopened:</strong> {problem.stillReportingCount || 1} of {problem.affectedUserCount || reporters.length || 1} affected users still reporting this issue unresolved.
+                  </span>
+                </div>
+                <Badge variant="high" size="xs">
+                  Active in Triage
+                </Badge>
+              </div>
+            )}
+
+            <div className="p-2.5 rounded-xl bg-[var(--surface-hover)] border border-[var(--glass-border)] text-[11px] text-[var(--text-secondary)] space-y-1">
+              <div className="flex items-center justify-between">
+                <strong className="text-[var(--text)]">100% Confirmation Policy:</strong>
+                <span className="text-[10px] text-[var(--text-muted)]">
+                  Total Affected: {problem.affectedUserCount || reporters.length || 1}
+                </span>
+              </div>
+              <p>
+                UNSAID requires every affected community member to confirm &quot;Solved&quot;. If any member reports &quot;Partially Solved&quot; or &quot;Not Solved&quot;, this issue automatically reopens and returns to the active admin queue.
+              </p>
+            </div>
+
+            <p className="text-xs font-semibold text-[var(--text)]">
+              Is this problem solved for you?
+            </p>
+
             {userFeedback && (
               <p className="text-[11px] text-[var(--text)] font-medium">
-                Your feedback:{' '}
-                <strong className="text-[var(--cyan)]">
+                Your submitted response:{' '}
+                <strong className={userFeedback === 'solved' ? 'text-[var(--success)]' : 'text-[var(--danger)]'}>
                   {userFeedback === 'solved'
                     ? '✓ Solved'
                     : userFeedback === 'partially_solved'
-                    ? 'Partially Solved'
-                    : 'Still Confused'}
+                    ? '🟡 Partially Solved'
+                    : '🔴 Not Solved'}
                 </strong>
               </p>
             )}
-
-            <p className="text-[11px] text-[var(--text-muted)]">
-              How effective was the outcome for you?
-            </p>
 
             <div className="grid grid-cols-3 gap-2">
               <button
                 type="button"
                 onClick={() => handleQualityFeedback('solved')}
+                disabled={verifyingResolution}
                 className={`py-2 px-3 rounded-xl text-xs font-semibold border transition-all cursor-pointer text-center ${
                   userFeedback === 'solved'
                     ? 'bg-[var(--success-light)] border-[var(--success)] text-[var(--success)] shadow-xs font-bold'
@@ -1031,6 +1179,7 @@ export const ProblemDetailsModal = ({
               <button
                 type="button"
                 onClick={() => handleQualityFeedback('partially_solved')}
+                disabled={verifyingResolution}
                 className={`py-2 px-3 rounded-xl text-xs font-semibold border transition-all cursor-pointer text-center ${
                   userFeedback === 'partially_solved'
                     ? 'bg-[var(--warning-light)] border-[var(--warning)] text-[var(--warning)] shadow-xs font-bold'
@@ -1041,14 +1190,15 @@ export const ProblemDetailsModal = ({
               </button>
               <button
                 type="button"
-                onClick={() => handleQualityFeedback('still_confused')}
+                onClick={() => handleQualityFeedback('not_solved')}
+                disabled={verifyingResolution}
                 className={`py-2 px-3 rounded-xl text-xs font-semibold border transition-all cursor-pointer text-center ${
-                  userFeedback === 'still_confused'
+                  userFeedback === 'not_solved' || userFeedback === 'still_confused'
                     ? 'bg-[var(--danger-light)] border-[var(--danger)] text-[var(--danger)] shadow-xs font-bold'
                     : 'bg-[var(--surface-hover)] hover:bg-[var(--glass-hover)] border-[var(--glass-border)] text-[var(--text)]'
                 }`}
               >
-                🔴 Still Confused
+                🔴 Not Solved
               </button>
             </div>
           </div>

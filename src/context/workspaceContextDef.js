@@ -22,6 +22,7 @@ export const WorkspaceContext = createContext({
   reviewJoinRequest: async () => {},
   pendingRequests: [],
   pendingRequestsCount: 0,
+  updateWorkspaceMemberProfile: async () => {},
   refreshWorkspaces: async () => {},
 });
 

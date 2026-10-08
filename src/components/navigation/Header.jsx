@@ -22,7 +22,7 @@ import { APP_CONFIG } from '../../config/appConfig';
  * Sticky glassmorphism top navigation bar.
  * Updates dynamically based on authentication state and user/admin privileges.
  */
-export const Header = ({ onOpenNotifications }) => {
+export const Header = () => {
   const { currentUser, userProfile, isAuthenticated, isAdmin: isPlatformAdmin, signOut } = useAuth();
   const { isCurrentWorkspaceAdmin, currentWorkspace, pendingRequestsCount } = useWorkspace();
   const { unreadCount } = useNotifications();
@@ -245,8 +245,6 @@ export const Header = ({ onOpenNotifications }) => {
                 onClick={() => {
                   if (isAdmin && pendingRequestsCount > 0 && unreadCount === 0) {
                     setRequestsModalOpen(true);
-                  } else if (onOpenNotifications) {
-                    onOpenNotifications();
                   } else {
                     setUserNotificationsOpen(true);
                   }

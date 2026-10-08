@@ -16,6 +16,7 @@ import {
   X,
   RefreshCw,
   Lock,
+  Users,
 } from 'lucide-react';
 import { ModalShell } from '../ui/ModalShell';
 import { Button } from '../ui/Button';
@@ -44,7 +45,7 @@ export const SubmitProblemModal = ({
   const { currentUser: authUser, userProfile: authProfile } = useAuth();
   const currentUser = propCurrentUser || authUser;
   const userProfile = propUserProfile || authProfile;
-  const { currentWorkspace: ctxWorkspace, workspaces } = useWorkspace();
+  const { currentWorkspace: ctxWorkspace, currentMembership, workspaces, isCurrentWorkspaceAdmin } = useWorkspace();
   const workspace = propWorkspace?.id ? propWorkspace : ctxWorkspace?.id ? ctxWorkspace : (workspaces?.length > 0 ? workspaces[0] : null);
   const { isAnonymous: defaultAnonymous, pseudonym, displayName } = useIdentity();
   const [title, setTitle] = useState('');
@@ -61,6 +62,7 @@ export const SubmitProblemModal = ({
   // Pre-Submit AI Modal State
   const [isAIModalOpen, setIsAIModalOpen] = useState(false);
   const [resolvedLocallyNotice, setResolvedLocallyNotice] = useState(false);
+  const [aggregationResult, setAggregationResult] = useState(null);
 
   // Photo Upload & Camera State
   const [selectedImage, setSelectedImage] = useState(null);
@@ -251,6 +253,7 @@ export const SubmitProblemModal = ({
     setCameraError('');
     setIsAIModalOpen(false);
     setResolvedLocallyNotice(false);
+    setAggregationResult(null);
     handleRemoveImage();
     onClose();
   };
@@ -328,12 +331,31 @@ export const SubmitProblemModal = ({
         shiftStatus: shiftStatus.label,
         currentUser,
         userProfile,
+        authorIdentity: isAnonPost ? null : {
+          professionalRole: currentMembership?.professionalRole || (isCurrentWorkspaceAdmin ? 'Admin' : 'Member'),
+          department: currentMembership?.department || null,
+          year: currentMembership?.year || null,
+          course: currentMembership?.course || null,
+          institution: currentMembership?.institution || workspace?.name || null,
+          organization: currentMembership?.organization || workspace?.name || null,
+          designation: currentMembership?.designation || null,
+        },
         isAnonymous: isAnonPost,
         pseudonym,
         imageUrl,
         imagePath,
         aiAnalysis,
+        candidateProblems,
       });
+
+      if (created?.isAggregated) {
+        setAggregationResult(created);
+        setIsAIModalOpen(false);
+        if (onProblemSubmitted) {
+          onProblemSubmitted(created);
+        }
+        return;
+      }
 
       if (onProblemSubmitted) {
         onProblemSubmitted(created);
@@ -364,7 +386,67 @@ export const SubmitProblemModal = ({
         subtitle={`Submitting to "${workspace?.name || 'Workspace'}"`}
         maxWidth="lg"
       >
-        {resolvedLocallyNotice ? (
+        {aggregationResult ? (
+          <div className="py-8 px-4 text-center space-y-5 animate-in fade-in zoom-in-95 duration-200">
+            <div className="w-14 h-14 mx-auto rounded-2xl bg-[var(--cyan)]/15 border border-[var(--cyan)]/30 text-[var(--cyan)] flex items-center justify-center shadow-lg shadow-[var(--cyan)]/10">
+              <Users className="w-7 h-7" />
+            </div>
+
+            <div className="space-y-1.5">
+              <Badge variant="cyan" size="sm" className="mb-1 font-semibold">
+                Existing Problem Found
+              </Badge>
+              <h3 className="text-base font-bold text-[var(--text)]">
+                {aggregationResult.isDuplicateUser
+                  ? 'Already Counted in This Issue'
+                  : 'Your Report Has Been Added to an Existing Problem'}
+              </h3>
+              <p className="text-xs text-[var(--text-secondary)] max-w-sm mx-auto leading-relaxed">
+                {aggregationResult.isDuplicateUser
+                  ? 'You have already reported this problem in its active cycle. Your report is linked, and the affected-user count already includes you.'
+                  : 'An active problem matching your report already exists in this workspace. Your report has been added to increase community priority for administrators.'}
+              </p>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-[var(--surface)] border border-[var(--glass-border)] text-left space-y-2.5 max-w-md mx-auto">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] font-mono uppercase tracking-wider text-[var(--text-muted)]">
+                  Linked Problem
+                </span>
+                <Badge variant="neutral" size="xs">
+                  {aggregationResult.category || 'General'}
+                </Badge>
+              </div>
+              <p className="text-xs font-semibold text-[var(--text)] line-clamp-2">
+                {aggregationResult.title}
+              </p>
+              <div className="pt-2 border-t border-[var(--glass-border)] flex items-center justify-between text-xs">
+                <span className="text-[var(--text-secondary)] font-medium">Affected Users</span>
+                {aggregationResult.isDuplicateUser ? (
+                  <Badge variant="primary" size="sm" className="font-semibold">
+                    👥 {aggregationResult.affectedUserCount || 1} unique users
+                  </Badge>
+                ) : (
+                  <div className="flex items-center gap-1.5 font-bold">
+                    <span className="text-[var(--text-muted)] line-through text-xs">
+                      {aggregationResult.previousAffectedCount || 1}
+                    </span>
+                    <span className="text-[var(--text-muted)]">→</span>
+                    <span className="text-[var(--cyan)] px-2 py-0.5 rounded-full bg-[var(--cyan)]/10 border border-[var(--cyan)]/30">
+                      👥 {aggregationResult.affectedUserCount} affected users
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="pt-2">
+              <Button type="button" variant="primary" size="md" onClick={handleClose}>
+                Done
+              </Button>
+            </div>
+          </div>
+        ) : resolvedLocallyNotice ? (
           <div className="py-8 px-4 text-center space-y-4">
             <div className="w-14 h-14 rounded-full bg-[var(--success)]/15 border border-[var(--success)]/30 text-[var(--success)] flex items-center justify-center mx-auto">
               <CheckCircle className="w-8 h-8" />
@@ -901,6 +983,16 @@ export const SubmitProblemModal = ({
           displayName,
           selectedImage,
           imagePreviewUrl,
+          userContext: !isAnonPost && currentMembership ? {
+            role: currentMembership.professionalRole || (isCurrentWorkspaceAdmin ? 'Admin' : 'Member'),
+            professionalRole: currentMembership.professionalRole || null,
+            department: currentMembership.department || null,
+            year: currentMembership.year || null,
+            course: currentMembership.course || null,
+            institution: currentMembership.institution || workspace?.name || null,
+            organization: currentMembership.organization || workspace?.name || null,
+            designation: currentMembership.designation || null,
+          } : null,
         }}
       />
     </>

@@ -48,6 +48,7 @@ export const PreSubmitAIModal = ({
       workaround: problemDraft.workaround,
       isEmergency: problemDraft.isEmergency,
       candidateProblems: candidateProblems || [],
+      userContext: problemDraft.userContext || null,
     })
       .then((result) => {
         setResolutionState(result);

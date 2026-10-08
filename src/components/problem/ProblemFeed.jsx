@@ -12,14 +12,15 @@ import {
   Lock,
   CloudOff,
   Trash2,
-  AlertTriangle,
   User,
+  Users,
+  AlertTriangle,
 } from 'lucide-react';
 import { GlassCard } from '../ui/GlassCard';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
 import { ProblemDetailsModal } from './ProblemDetailsModal';
-import { toggleProblemUpvote, deleteProblem } from '../../services/problemService';
+import { toggleProblemUpvote, deleteProblem, sortProblems } from '../../services/problemService';
 import { useAuth } from '../../hooks/useAuth';
 
 export const ProblemFeed = ({
@@ -55,7 +56,7 @@ export const ProblemFeed = ({
   };
 
   const filteredProblems = useMemo(() => {
-    return problems.filter((prob) => {
+    const list = problems.filter((prob) => {
       // 1. My queries filter
       if (statusFilter === 'mine') {
         if (!effectiveUser?.uid) return false;
@@ -94,6 +95,8 @@ export const ProblemFeed = ({
 
       return true;
     });
+
+    return sortProblems(list);
   }, [problems, statusFilter, searchQuery, effectiveUser]);
 
   const activeCount = useMemo(
@@ -373,11 +376,27 @@ export const ProblemFeed = ({
                   </div>
 
                   <div className="flex items-center gap-2">
+                    <span
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-[var(--primary)]/10 text-[var(--primary)] border border-[var(--primary)]/20 shadow-xs"
+                      title={`${prob.affectedUserCount || 1} unique user${(prob.affectedUserCount || 1) === 1 ? '' : 's'} affected by this issue`}
+                    >
+                      <Users className="w-3.5 h-3.5" />
+                      <span>{prob.affectedUserCount || 1} affected</span>
+                    </span>
+                    {prob.stillReportingCount > 0 && (
+                      <span
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold bg-[var(--danger-light)] text-[var(--danger)] border border-[var(--danger)]/30"
+                        title={`${prob.stillReportingCount} user${prob.stillReportingCount === 1 ? '' : 's'} reported unresolved`}
+                      >
+                        <AlertTriangle className="w-3 h-3" />
+                        <span>{prob.stillReportingCount} still reporting</span>
+                      </span>
+                    )}
                     <Badge
-                      variant={prob.status === 'solved' ? 'low' : isEmergency ? 'high' : 'medium'}
+                      variant={prob.status === 'solved' ? 'low' : isEmergency ? 'high' : prob.status === 'reopened' ? 'warning' : 'medium'}
                       size="sm"
                     >
-                      {prob.status === 'solved' ? 'SOLVED' : 'OPEN'}
+                      {prob.status === 'solved' ? 'SOLVED' : prob.status === 'reopened' ? 'REOPENED' : 'OPEN'}
                     </Badge>
                   </div>
                 </div>
@@ -453,15 +472,23 @@ export const ProblemFeed = ({
 
                 {/* Footer: Author, Timestamp, Actions */}
                 <div className="pt-3 border-t border-[var(--glass-border)] flex items-center justify-between text-xs text-[var(--text-muted)]">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     {prob.isAnonymous ? (
                       <span className="font-semibold font-mono text-[var(--cyan)]" title="Anonymous Workspace Member">
                         {prob.authorName || 'Anon Member'}
                       </span>
                     ) : (
-                      <span className="font-medium text-[var(--text)]">
-                        {prob.authorName || 'Member'}
-                      </span>
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="font-medium text-[var(--text)]">
+                          {prob.authorName || 'Member'}
+                        </span>
+                        {prob.authorIdentity?.professionalRole && (
+                          <span className="text-[10px] font-semibold px-2 py-0.2 rounded-full bg-[var(--surface-hover)] border border-[var(--glass-border)] text-[var(--cyan)]">
+                            {prob.authorIdentity.professionalRole}
+                            {prob.authorIdentity.year ? ` • ${prob.authorIdentity.year}` : ''}
+                          </span>
+                        )}
+                      </div>
                     )}
                     <span>•</span>
                     <span className="flex items-center gap-1">

@@ -252,6 +252,7 @@ def analyze_problem(
     workaround: str = "",
     is_emergency: bool = False,
     recent_candidates: Optional[List[Dict[str, Any]]] = None,
+    user_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Analyzes a problem draft to produce a structured pre-submit resolution,
@@ -264,6 +265,36 @@ def analyze_problem(
     clean_cat = _sanitize_string(category, 100) or "General"
     clean_sub = _sanitize_string(sub_issue, 100)
     clean_work = _sanitize_string(workaround, 1000)
+
+    # Format optional reporter context for domain awareness (no private PII)
+    reporter_context = ""
+    if user_context and isinstance(user_context, dict):
+        role_val = str(user_context.get("professionalRole") or user_context.get("role") or "").strip()
+        dept_val = str(user_context.get("department") or "").strip()
+        year_val = str(user_context.get("year") or "").strip()
+        course_val = str(user_context.get("course") or "").strip()
+        inst_val = str(user_context.get("institution") or user_context.get("organization") or "").strip()
+        desig_val = str(user_context.get("designation") or "").strip()
+
+        context_lines = []
+        if role_val:
+            context_lines.append(f"- Role: {role_val}")
+        if desig_val and desig_val.lower() != role_val.lower():
+            context_lines.append(f"- Designation: {desig_val}")
+        if dept_val:
+            context_lines.append(f"- Department: {dept_val}")
+        if year_val:
+            context_lines.append(f"- Academic Year: {year_val}")
+        if course_val:
+            context_lines.append(f"- Program / Course: {course_val}")
+        if inst_val:
+            context_lines.append(f"- Institution / Organization: {inst_val}")
+
+        if context_lines:
+            reporter_context = (
+                "\nREPORTER CONTEXT (Workspace domain identity for situational awareness only):\n"
+                + "\n".join(context_lines)
+            )
 
     # Format authorized candidate issues for similarity detection
     candidates_context = ""
@@ -293,7 +324,7 @@ DESCRIPTION: {clean_desc}
 REPORTED CATEGORY: {clean_cat}
 SUB-ISSUE: {clean_sub or 'None specified'}
 MEMBER-PROPOSED WORKAROUND: {clean_work or 'None provided'}
-IS EMERGENCY FLAG: {is_emergency}
+IS EMERGENCY FLAG: {is_emergency}{reporter_context}
 {candidates_context}
 
 Respond with a strictly formatted JSON object matching this schema:
@@ -574,13 +605,24 @@ QUERY CATEGORY: {category}
 CANDIDATES:
 {candidates_text}
 
-Determine if any candidate is discussing the exact same physical, operational, or technical problem.
+Determine if any candidate is discussing the EXACT same underlying physical, operational, or technical problem.
+
+CRITICAL AGGREGATION RULES:
+1. ONLY match if both describe the exact same real-world issue affecting the same service, equipment, or facility.
+   - Example SAME: "Computer lab PC is not turning on" and "Lab computer won't power up" -> SAME problem.
+   - Example DIFFERENT: "Computer lab PC is not turning on" and "Computer lab AC is not working" -> NOT the same problem (different equipment).
+   - Example DIFFERENT: "Wi-Fi not working in Block A" and "Wi-Fi not working in Block B" -> NOT the same problem (different physical locations).
+2. If location, block, room, device, or specific target differs, do NOT aggregate.
+3. If not confident it is the exact same underlying problem, set "hasSimilarProblem": false.
+
 Respond strictly in JSON:
 {{
   "hasSimilarProblem": <true or false>,
+  "confidence": "<high or medium or low>",
   "similarProblems": [
     {{
       "problemId": "<EXACT ID from candidates above>",
+      "confidence": "<high or medium or low>",
       "reason": "<one sentence explaining the overlap>"
     }}
   ]
@@ -608,10 +650,12 @@ Respond strictly in JSON:
         if bool(data.get("hasSimilarProblem")) and isinstance(data.get("similarProblems"), list):
             for item in data.get("similarProblems"):
                 pid = str(item.get("problemId", "")).strip()
-                if pid in valid_ids:
+                conf = str(item.get("confidence", "high")).lower()
+                if pid in valid_ids and conf == "high":
                     similar_list.append({
                         "problemId": pid,
                         "title": valid_ids[pid],
+                        "confidence": conf,
                         "reason": _sanitize_string(item.get("reason", "Identical issue"), 200),
                     })
 

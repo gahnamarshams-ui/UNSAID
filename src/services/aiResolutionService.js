@@ -71,6 +71,7 @@ export const fetchAIResolution = async ({
   workaround = '',
   isEmergency = false,
   candidateProblems = [],
+  userContext = null,
 }) => {
   if (!workspaceId) {
     return {
@@ -89,6 +90,7 @@ export const fetchAIResolution = async ({
     subIssue: (subIssue || '').trim(),
     workaround: (workaround || '').trim(),
     isEmergency: Boolean(isEmergency),
+    userContext: userContext && typeof userContext === 'object' ? userContext : null,
     candidateProblems: Array.isArray(candidateProblems)
       ? candidateProblems.slice(0, 10).map((c) => ({
           id: c.id,
@@ -412,6 +414,70 @@ export const sendUserChatMessage = async ({
       success: false,
       error: err.name === 'AbortError' ? 'AI request timed out.' : 'AI network error.',
     };
+  }
+};
+
+/**
+ * Evaluates whether a new problem matches existing active candidates in the same workspace.
+ * Uses backend Gemini AI if connected, with graceful fallback.
+ *
+ * @param {Object} params
+ * @param {string} params.workspaceId
+ * @param {string} params.title
+ * @param {string} params.description
+ * @param {string} [params.category]
+ * @param {Array} params.candidateProblems
+ * @returns {Promise<{ hasSimilarProblem: boolean, similarProblems: Array }>}
+ */
+export const checkSimilarProblem = async ({
+  workspaceId,
+  title,
+  description,
+  category = 'General',
+  candidateProblems = [],
+}) => {
+  if (!workspaceId || !title || !description || !candidateProblems?.length) {
+    return { hasSimilarProblem: false, similarProblems: [] };
+  }
+
+  const payload = {
+    workspaceId,
+    title: title.trim(),
+    description: description.trim(),
+    category: category.trim(),
+    candidateProblems: candidateProblems.slice(0, 15).map((p) => ({
+      id: p.id,
+      title: p.title,
+      description: p.description,
+      category: p.category,
+    })),
+  };
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 12000);
+
+  try {
+    const headers = await getAuthHeaders();
+    const response = await fetch(`${API_BASE}/api/ai/find-similar`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      return { hasSimilarProblem: false, similarProblems: [] };
+    }
+
+    const data = await response.json();
+    if (data?.success && data?.result) {
+      return data.result;
+    }
+    return { hasSimilarProblem: false, similarProblems: [] };
+  } catch {
+    clearTimeout(timeoutId);
+    return { hasSimilarProblem: false, similarProblems: [] };
   }
 };
 

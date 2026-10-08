@@ -26,6 +26,8 @@ import {
   Lightbulb,
   Loader2,
   Trash2,
+  User,
+  Users,
 } from 'lucide-react';
 
 import { GlassCard } from '../ui/GlassCard';
@@ -49,11 +51,12 @@ import {
   subscribeToEscalationVotes,
   submitEscalationVote,
   subscribeToProblemFeedback,
-  submitQualityFeedback,
   markProblemRecurring,
   updateProblemStatus,
   markProblemThreadRead,
   deleteProblem,
+  subscribeToProblemReports,
+  submitResolutionVerification,
 } from '../../services/problemService';
 import { subscribeToProblemPoll } from '../../services/pollService';
 
@@ -136,6 +139,7 @@ export const QueryTriageWorkspace = ({
   const [acknowledgements, setAcknowledgements] = useState([]);
   const [escalationVotes, setEscalationVotes] = useState([]);
   const [qualityFeedbacks, setQualityFeedbacks] = useState([]);
+  const [reporters, setReporters] = useState([]);
 
   // Local problem override for immediate optimistic updates
   const [localProblemOverride, setLocalProblemOverride] = useState(null);
@@ -229,6 +233,7 @@ export const QueryTriageWorkspace = ({
         setAcknowledgements([]);
         setEscalationVotes([]);
         setQualityFeedbacks([]);
+        setReporters([]);
       });
       return;
     }
@@ -273,6 +278,12 @@ export const QueryTriageWorkspace = ({
       (err) => console.warn('[UNSAID Triage Feedback Notice]', err)
     );
 
+    const unsubReports = subscribeToProblemReports(
+      probId,
+      (list) => setReporters(list),
+      (err) => console.warn('[UNSAID Triage Reports Notice]', err)
+    );
+
     // Mark thread read
     const viewerRole = isAdmin ? 'admin' : 'member';
     markProblemThreadRead(probId, viewerRole);
@@ -283,6 +294,7 @@ export const QueryTriageWorkspace = ({
       unsubAcks();
       unsubVotes();
       unsubFeedback();
+      unsubReports();
     };
   }, [selectedProblem?.id, isAdmin]);
 
@@ -341,24 +353,40 @@ export const QueryTriageWorkspace = ({
         const isSolvedA = a.status === 'solved' || a.status === 'resolved';
         const isSolvedB = b.status === 'solved' || b.status === 'resolved';
 
-        // Solved items appear lower
+        // 1. Solved items appear lower (Section 14)
         if (isSolvedA && !isSolvedB) return 1;
         if (!isSolvedA && isSolvedB) return -1;
 
-        // Sort by Priority: Emergency -> High -> Medium -> Low
+        // 2. Active Emergency queries strictly first (preserve life-critical emergency override, Section 13)
+        const isEmergA = Boolean(a.isEmergency || a.priority === 'emergency');
+        const isEmergB = Boolean(b.isEmergency || b.priority === 'emergency');
+        if (isEmergA !== isEmergB) {
+          return isEmergA ? -1 : 1;
+        }
+
+        // 3. PRIMARY ORDERING SIGNAL: AFFECTED UNIQUE USER COUNT DESCENDING (Section 9 & 10)
+        const countA = Number(a.affectedUserCount ?? a.affectedUsersCount ?? (a.affectedUserIds?.length || 1));
+        const countB = Number(b.affectedUserCount ?? b.affectedUsersCount ?? (b.affectedUserIds?.length || 1));
+        if (countB !== countA) {
+          return countB - countA;
+        }
+
+        // 4. DETERMINISTIC TIE-BREAKER 1: Existing Priority Level (Section 12)
         const weightA = getPriorityWeight(a);
         const weightB = getPriorityWeight(b);
         if (weightB !== weightA) return weightB - weightA;
 
-        // Then by latest activity/createdAt
-        const timeA =
-          a.updatedAt?.toMillis?.() ||
-          a.createdAt?.toMillis?.() ||
-          (a.createdAt ? new Date(a.createdAt).getTime() : 0);
-        const timeB =
-          b.updatedAt?.toMillis?.() ||
-          b.createdAt?.toMillis?.() ||
-          (b.createdAt ? new Date(b.createdAt).getTime() : 0);
+        // 5. DETERMINISTIC TIE-BREAKER 2: Latest activity / timestamp (Section 12)
+        const getProblemTimestamp = (p) => {
+          const ts = p.updatedAt || p.createdAt;
+          if (!ts) return 0;
+          if (typeof ts.toMillis === 'function') return ts.toMillis();
+          if (ts.seconds) return ts.seconds * 1000;
+          const parsed = new Date(ts).getTime();
+          return isNaN(parsed) ? 0 : parsed;
+        };
+        const timeA = getProblemTimestamp(a);
+        const timeB = getProblemTimestamp(b);
         return timeB - timeA;
       });
   }, [problems, searchQuery, priorityFilter, statusFilter, categoryFilter]);
@@ -501,13 +529,25 @@ export const QueryTriageWorkspace = ({
   const handleQualityFeedback = async (rating) => {
     if (!currentUser || !selectedProblem?.id) return;
     try {
-      await submitQualityFeedback({
+      const res = await submitResolutionVerification({
         problemId: selectedProblem.id,
         workspaceId: selectedProblem.workspaceId,
-        rating,
-        currentUser,
-        userProfile,
+        userId: currentUser.uid,
+        userName: userProfile?.fullName || currentUser?.displayName || 'Workspace Member',
+        response: rating,
       });
+
+      if (res) {
+        const updated = {
+          ...selectedProblem,
+          status: res.status,
+          isReopened: res.isReopened,
+          stillReportingCount: res.stillReportingCount,
+          verificationStats: res.verificationStats,
+        };
+        setLocalProblemOverride(updated);
+        if (onProblemUpdated) onProblemUpdated(updated);
+      }
     } catch (err) {
       console.error('[UNSAID Feedback Error]', err);
     }
@@ -881,6 +921,26 @@ export const QueryTriageWorkspace = ({
                       </span>
                     </div>
 
+                    {/* Primary Sorting Signal: Affected Users Metric (Section 15) */}
+                    <div className="flex items-center justify-between gap-2 my-1.5 flex-wrap">
+                      <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-[var(--primary)]/15 border border-[var(--primary)]/30 text-[var(--primary)] font-bold text-xs shadow-xs">
+                        <Users className="w-3.5 h-3.5" />
+                        <span>
+                          {prob.affectedUserCount || prob.affectedUserIds?.length || 1}{' '}
+                          {Number(prob.affectedUserCount || prob.affectedUserIds?.length || 1) === 1
+                            ? 'affected user'
+                            : 'affected users'}
+                        </span>
+                      </div>
+
+                      {(prob.isReopened || prob.stillReportingCount > 0) && (
+                        <span className="text-[10px] font-semibold px-2 py-0.5 rounded-lg bg-[var(--warning-light)]/30 border border-[var(--warning)]/50 text-[var(--warning)] flex items-center gap-1">
+                          <AlertCircle className="w-3 h-3" />
+                          {prob.stillReportingCount || 1} still reporting
+                        </span>
+                      )}
+                    </div>
+
                     {/* Problem Title & Snippet */}
                     <h4 className="text-sm font-bold text-[var(--text)] tracking-tight line-clamp-1 group-hover:text-[var(--primary)] transition-colors">
                       {prob.title || 'Untitled Query'}
@@ -891,10 +951,15 @@ export const QueryTriageWorkspace = ({
 
                     {/* Bottom Row: Votes / Acks / Feedback / Author */}
                     <div className="flex items-center justify-between gap-2 pt-2.5 mt-2 border-t border-[var(--glass-border)] text-[11px] text-[var(--text-muted)]">
-                      <div className="flex items-center gap-2">
-                        <span className="truncate max-w-[120px]">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="truncate max-w-[110px]">
                           By {prob.authorName || prob.authorEmail || 'Member'}
                         </span>
+                        {!prob.isAnonymous && prob.authorIdentity?.professionalRole && (
+                          <span className="text-[9px] font-semibold px-1.5 py-0.2 rounded-full bg-[var(--surface-hover)] border border-[var(--glass-border)] text-[var(--cyan)]">
+                            {prob.authorIdentity.professionalRole}
+                          </span>
+                        )}
                         <span>•</span>
                         <span className="text-[var(--cyan)] font-medium">
                           {prob.category || 'General'}
@@ -1033,6 +1098,127 @@ export const QueryTriageWorkspace = ({
                     <p className="text-[var(--text-muted)] text-[11px] leading-relaxed">
                       {selectedProblem.workaround}
                     </p>
+                  </div>
+                )}
+              </div>
+
+              {/* Primary Priority Signal: Affected Users Metric & Unique Reporters */}
+              <div className="p-4 rounded-2xl bg-[var(--surface-hover)] border border-[var(--glass-border)] space-y-3">
+                <div className="flex items-center justify-between flex-wrap gap-3">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-[var(--primary)]/15 border border-[var(--primary)]/30 text-[var(--primary)] flex items-center justify-center font-bold">
+                      <Users className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-bold text-[var(--text)]">
+                          {selectedProblem.affectedUserCount || reporters.length || 1}{' '}
+                          {Number(selectedProblem.affectedUserCount || reporters.length || 1) === 1
+                            ? 'Affected User'
+                            : 'Affected Users'}
+                        </span>
+                        {selectedProblem.isReopened && (
+                          <Badge variant="high" size="xs">
+                            Reopened ({selectedProblem.stillReportingCount || 1} unresolved)
+                          </Badge>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-[var(--text-muted)]">
+                        Primary priority signal: determines queue ordering descending in Admin Query Triage.
+                      </p>
+                    </div>
+                  </div>
+
+                  {selectedProblem.verificationStats && (
+                    <div className="text-right">
+                      <div className="text-xs font-semibold text-[var(--text)]">
+                        Verification: {selectedProblem.verificationStats.solved} / {selectedProblem.verificationStats.total} solved
+                      </div>
+                      {selectedProblem.verificationStats.unresolved > 0 && (
+                        <div className="text-[10px] text-[var(--danger)] font-bold">
+                          {selectedProblem.verificationStats.unresolved} user still reporting unresolved
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* Unique reporters list */}
+                {reporters.length > 0 && (
+                  <div className="pt-2 border-t border-[var(--glass-border)] flex items-center gap-1.5 flex-wrap">
+                    <span className="text-[10px] uppercase font-bold text-[var(--text-muted)] mr-1">
+                      Unique Affected Reporters ({reporters.length}):
+                    </span>
+                    {reporters.map((rep) => (
+                      <span
+                        key={rep.id}
+                        className="text-[11px] px-2 py-0.5 rounded-lg bg-[var(--surface)] border border-[var(--glass-border)] text-[var(--text)] flex items-center gap-1"
+                      >
+                        <User className="w-2.5 h-2.5 text-[var(--primary)]" />
+                        <span>{rep.isAnonymous ? (rep.pseudonym || 'Anonymous') : (rep.userName || 'Member')}</span>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Reporter Identity Context Card */}
+              <div className="p-3.5 rounded-2xl bg-[var(--surface-hover)] border border-[var(--glass-border)] space-y-2">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-[var(--text-muted)] flex items-center gap-1.5">
+                    <User className="w-3.5 h-3.5 text-[var(--cyan)]" />
+                    <span>Reporter Context</span>
+                  </span>
+                  {selectedProblem.isAnonymous ? (
+                    <Badge variant="neutral" size="sm">Anonymous Query</Badge>
+                  ) : (
+                    <Badge variant="cyan" size="sm">
+                      {selectedProblem.authorIdentity?.professionalRole || 'Workspace Member'}
+                    </Badge>
+                  )}
+                </div>
+
+                {selectedProblem.isAnonymous ? (
+                  <p className="text-xs text-[var(--text-muted)] italic">
+                    Reporter submitted this problem anonymously. Personal identity is shielded.
+                  </p>
+                ) : (
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-1 text-xs">
+                    <div>
+                      <span className="text-[10px] text-[var(--text-muted)] uppercase block font-semibold">
+                        Reporter
+                      </span>
+                      <span className="font-bold text-[var(--text)] truncate block">
+                        {selectedProblem.authorName || 'Member'}
+                      </span>
+                    </div>
+
+                    <div>
+                      <span className="text-[10px] text-[var(--text-muted)] uppercase block font-semibold">
+                        Role
+                      </span>
+                      <span className="font-medium text-[var(--text-secondary)] block">
+                        {selectedProblem.authorIdentity?.professionalRole || 'Member'}
+                      </span>
+                    </div>
+
+                    <div>
+                      <span className="text-[10px] text-[var(--text-muted)] uppercase block font-semibold">
+                        Department
+                      </span>
+                      <span className="font-medium text-[var(--text-secondary)] block">
+                        {selectedProblem.authorIdentity?.department || '—'}
+                      </span>
+                    </div>
+
+                    <div>
+                      <span className="text-[10px] text-[var(--text-muted)] uppercase block font-semibold">
+                        {selectedProblem.authorIdentity?.year ? 'Year' : selectedProblem.authorIdentity?.institution ? 'Institution' : 'Context'}
+                      </span>
+                      <span className="font-medium text-[var(--text-secondary)] block">
+                        {selectedProblem.authorIdentity?.year || selectedProblem.authorIdentity?.institution || selectedProblem.authorIdentity?.organization || selectedProblem.authorIdentity?.designation || '—'}
+                      </span>
+                    </div>
                   </div>
                 )}
               </div>

@@ -10,7 +10,6 @@ import {
   RefreshCw,
   Building2,
   XCircle,
-  Sparkles,
 } from 'lucide-react';
 
 import { useAuth } from '../hooks/useAuth';
@@ -29,6 +28,7 @@ import { ProblemFeed } from '../components/problem/ProblemFeed';
 import { SubmitProblemModal } from '../components/problem/SubmitProblemModal';
 import { WorkspaceHistoryModal } from '../components/history/WorkspaceHistoryModal';
 import { UserChatbotModal } from '../components/chat/UserChatbotModal';
+import { WorkspaceProfilePrompt } from '../components/workspace/WorkspaceProfilePrompt';
 import { UnsaidLogoMark } from '../components/ui/UnsaidLogoMark';
 import { OfflineBanner } from '../components/common/OfflineBanner';
 import { getShiftStatus } from '../config/shiftConfig';
@@ -278,6 +278,9 @@ export const UserDashboardShell = () => {
             </div>
           </div>
         )}
+
+        {/* Subtle Workspace Profile Completion Prompt */}
+        <WorkspaceProfilePrompt />
 
         {/* Live Clock & Shift Lifecycle Bar */}
         <div className="p-3.5 rounded-2xl bg-[var(--surface)] border border-[var(--glass-border)] flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs shadow-xs">
