@@ -47,6 +47,7 @@ import {
   markProblemRecurring,
   markProblemThreadRead,
   deleteProblem,
+  deduplicateReporters,
 } from '../../services/problemService';
 
 export const ProblemDetailsModal = ({
@@ -180,6 +181,55 @@ export const ProblemDetailsModal = ({
       qualityFeedbacks,
     });
   }, [problem, messages, poll, acknowledgements, escalationVotes, qualityFeedbacks]);
+
+  const allUniqueReporters = useMemo(() => {
+    if (!problem) return [];
+    const combined = [...(reporters || [])];
+    if (Array.isArray(problem.reporters)) {
+      combined.push(...problem.reporters);
+    }
+    if (Array.isArray(problem.reporterNames)) {
+      problem.reporterNames.forEach((name) => combined.push({ userName: name }));
+    }
+    if (combined.length === 0 && problem.authorName) {
+      combined.push({
+        userId: problem.authorId || problem.createdBy,
+        userName: problem.authorName,
+        isAnonymous: Boolean(problem.isAnonymous),
+        pseudonym: problem.pseudonym || null,
+      });
+    }
+    return deduplicateReporters(combined);
+  }, [reporters, problem]);
+
+  const currentUid = currentUser?.uid;
+  const currentUserName = (
+    userProfile?.fullName ||
+    currentUser?.displayName ||
+    ''
+  ).trim().toLowerCase();
+
+  const isCurrentUserReporter = useMemo(() => {
+    if (!currentUid && !currentUserName) return false;
+    return allUniqueReporters.some(
+      (r) =>
+        (r.userId && r.userId === currentUid) ||
+        (r.userName && r.userName.trim().toLowerCase() === currentUserName)
+    );
+  }, [allUniqueReporters, currentUid, currentUserName]);
+
+  const otherReporters = useMemo(() => {
+    return allUniqueReporters.filter(
+      (r) =>
+        r.userId !== currentUid &&
+        (!r.userName || r.userName.trim().toLowerCase() !== currentUserName)
+    );
+  }, [allUniqueReporters, currentUid, currentUserName]);
+
+  const uniqueAffectedCount = Math.max(
+    Number(problem?.affectedUserCount || 1),
+    allUniqueReporters.length
+  );
 
   if (!problem) return null;
 
@@ -694,7 +744,7 @@ export const ProblemDetailsModal = ({
             </span>
             <div className="mt-1 flex items-center gap-1.5 font-bold text-[var(--primary)]">
               <Users className="w-3.5 h-3.5 text-[var(--cyan)]" />
-              <span>{problem.affectedUserCount || reporters.length || 1} people</span>
+              <span>{uniqueAffectedCount} {uniqueAffectedCount === 1 ? 'person' : 'people'}</span>
             </div>
             {problem.stillReportingCount > 0 && (
               <span className="text-[10px] text-[var(--danger)] font-semibold block mt-0.5">
@@ -730,32 +780,144 @@ export const ProblemDetailsModal = ({
           </div>
         </div>
 
-        {/* Affected Community Reporters List */}
-        {reporters.length > 0 && (
-          <div className="p-3.5 rounded-2xl bg-[var(--surface)] border border-[var(--glass-border)] space-y-2 text-xs">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-[var(--text)] flex items-center gap-1.5">
-                <Users className="w-3.5 h-3.5 text-[var(--cyan)]" />
-                <span>Affected Community Members ({reporters.length})</span>
-              </span>
-              <span className="text-[10px] text-[var(--text-muted)]">
-                Aggregated into this single incident document
-              </span>
-            </div>
-            <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
-              {reporters.map((rep) => (
-                <span
-                  key={rep.id}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] bg-[var(--surface-hover)] border border-[var(--glass-border)] text-[var(--text)] font-medium"
-                >
-                  <span className="w-1.5 h-1.5 rounded-full bg-[var(--cyan)]" />
-                  <span>{rep.userName || 'Member'}</span>
-                  {rep.isAnonymous && <span className="text-[10px] text-[var(--text-muted)] italic">(anon)</span>}
+        {/* Dedicated Reporters & Affected Users Section */}
+        <div className="p-4 rounded-2xl bg-[var(--surface)] border border-[var(--glass-border)] space-y-3 text-xs">
+          {isAdmin ? (
+            /* ADMIN VIEW: Complete deduplicated list of all reporters */
+            <>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-xl bg-[var(--primary)]/15 border border-[var(--primary)]/30 text-[var(--primary)] flex items-center justify-center font-bold">
+                    <Users className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold uppercase tracking-wider text-[var(--text)] block">
+                      Reporters
+                    </span>
+                    <span className="text-[11px] text-[var(--cyan)] font-semibold">
+                      Affected Users: {uniqueAffectedCount}
+                    </span>
+                  </div>
+                </div>
+                <Badge variant="cyan" size="xs">Admin Complete View</Badge>
+              </div>
+
+              <div className="pt-2 border-t border-[var(--glass-border)]">
+                {allUniqueReporters.length > 0 ? (
+                  <ul className="space-y-1.5 pl-0.5">
+                    {allUniqueReporters.map((rep, idx) => (
+                      <li
+                        key={rep.userId || rep.id || idx}
+                        className="flex items-center justify-between py-1 px-2.5 rounded-xl bg-[var(--surface-hover)] border border-[var(--glass-border)] text-xs text-[var(--text)]"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="w-1.5 h-1.5 rounded-full bg-[var(--cyan)] shrink-0" />
+                          <span className="font-semibold">
+                            {rep.isAnonymous ? (rep.pseudonym || 'Anonymous') : (rep.userName || 'Member')}
+                          </span>
+                        </div>
+                        {rep.isAnonymous ? (
+                          <span className="text-[10px] text-[var(--text-muted)] italic font-mono">(anon)</span>
+                        ) : rep.userEmail ? (
+                          <span className="text-[10px] text-[var(--text-muted)] truncate max-w-[150px]">{rep.userEmail}</span>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="text-xs text-[var(--text-muted)]">
+                    No reporter records found.
+                  </div>
+                )}
+              </div>
+            </>
+          ) : isCurrentUserReporter ? (
+            /* USER VIEW (WHEN USER IS ONE OF THE REPORTERS):
+               Shows total affected count, excludes own name, shows other reporters */
+            <>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-xl bg-[var(--cyan)]/15 border border-[var(--cyan)]/30 text-[var(--cyan)] flex items-center justify-center">
+                    <Users className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold text-[var(--text)] block">
+                      {uniqueAffectedCount} {uniqueAffectedCount === 1 ? 'user is affected' : 'users are affected'}
+                    </span>
+                    <span className="text-[10px] text-[var(--text-muted)]">
+                      Your report is recorded in this problem.
+                    </span>
+                  </div>
+                </div>
+                <Badge variant="primary" size="xs">You reported this</Badge>
+              </div>
+
+              <div className="pt-2 border-t border-[var(--glass-border)] space-y-1.5">
+                {otherReporters.length > 0 ? (
+                  <>
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-[var(--text-secondary)] block">
+                      Other reporters:
+                    </span>
+                    <ul className="space-y-1.5 pl-0.5">
+                      {otherReporters.map((rep, idx) => (
+                        <li
+                          key={rep.userId || rep.id || idx}
+                          className="flex items-center gap-2 text-xs font-medium text-[var(--text)] py-0.5"
+                        >
+                          <span className="w-1.5 h-1.5 rounded-full bg-[var(--cyan)] shrink-0" />
+                          <span>{rep.isAnonymous ? (rep.pseudonym || 'Anonymous') : (rep.userName || 'Member')}</span>
+                          {rep.isAnonymous && <span className="text-[10px] text-[var(--text-muted)] italic">(anon)</span>}
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                ) : (
+                  <p className="text-xs text-[var(--text-secondary)]">
+                    You are currently the only user who has reported this problem.
+                  </p>
+                )}
+              </div>
+            </>
+          ) : (
+            /* USER VIEW (WHEN USER IS NOT A REPORTER):
+               Shows total affected count and all reporters */
+            <>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-xl bg-[var(--primary)]/15 border border-[var(--primary)]/30 text-[var(--primary)] flex items-center justify-center">
+                    <Users className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold text-[var(--text)] block">
+                      {uniqueAffectedCount} {uniqueAffectedCount === 1 ? 'user is affected' : 'users are affected'}
+                    </span>
+                    <span className="text-[10px] text-[var(--text-muted)]">
+                      Aggregated community problem
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="pt-2 border-t border-[var(--glass-border)] space-y-1.5">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-[var(--text-secondary)] block">
+                  Reported by:
                 </span>
-              ))}
-            </div>
-          </div>
-        )}
+                <ul className="space-y-1.5 pl-0.5">
+                  {allUniqueReporters.map((rep, idx) => (
+                    <li
+                      key={rep.userId || rep.id || idx}
+                      className="flex items-center gap-2 text-xs font-medium text-[var(--text)] py-0.5"
+                    >
+                      <span className="w-1.5 h-1.5 rounded-full bg-[var(--cyan)] shrink-0" />
+                      <span>{rep.isAnonymous ? (rep.pseudonym || 'Anonymous') : (rep.userName || 'Member')}</span>
+                      {rep.isAnonymous && <span className="text-[10px] text-[var(--text-muted)] italic">(anon)</span>}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </>
+          )}
+        </div>
 
         {/* Confidential 1-on-1 Direct Thread Banner */}
         {problem.isConfidential && (

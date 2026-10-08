@@ -386,6 +386,41 @@ export const sortProblems = (list) => {
 
 
 /**
+ * Utility: Deduplicates a list of reporter records by both user ID and display name.
+ * Guarantees that no user or name appears multiple times.
+ */
+export const deduplicateReporters = (reporters = []) => {
+  const seenIds = new Set();
+  const seenNames = new Set();
+  const result = [];
+
+  for (const r of reporters) {
+    if (!r) continue;
+    const uid = r.userId || r.id;
+    const rawName = r.isAnonymous ? (r.pseudonym || 'Anonymous') : (r.userName || r.authorName || 'Member');
+    const name = String(rawName || 'Member').trim();
+    const nameKey = name.toLowerCase();
+
+    // Prevent duplicate user IDs
+    if (uid && seenIds.has(uid)) continue;
+    // Prevent duplicate display names
+    if (nameKey && seenNames.has(nameKey)) continue;
+
+    if (uid) seenIds.add(uid);
+    if (nameKey) seenNames.add(nameKey);
+
+    result.push({
+      ...r,
+      userId: uid,
+      userName: name,
+      displayName: name,
+    });
+  }
+
+  return result;
+};
+
+/**
  * Submits a new problem scoped strictly to a workspace.
  * Automatically checks for active duplicate/same underlying problems in the same workspace.
  * If matched: aggregates under the existing problem and increments affectedUserCount only if user is unique.
@@ -476,6 +511,13 @@ export const submitProblem = async ({
         ? existingUserIds
         : [...existingUserIds, authorId];
 
+      const reporterEntry = {
+        userId: authorId,
+        userName: authorName,
+        isAnonymous: Boolean(isAnonymous),
+        pseudonym: pseudonym || null,
+      };
+
       // Reporter record with deterministic ID: {problemId}_{userId}
       const reportDocId = `${targetProblemId}_${authorId}`;
       const reportData = {
@@ -501,6 +543,27 @@ export const submitProblem = async ({
       ];
       saveLocalReports(targetProblemId, updatedReports);
 
+      // Assemble all reports to deduplicate and derive otherReporters
+      let baseReports = currentReports;
+      if (baseReports.length === 0 && Array.isArray(existingProblem.reporters)) {
+        baseReports = existingProblem.reporters;
+      }
+      if (baseReports.length === 0 && existingProblem.authorName) {
+        baseReports = [
+          {
+            userId: existingProblem.authorId || existingProblem.createdBy,
+            userName: existingProblem.authorName,
+            isAnonymous: Boolean(existingProblem.isAnonymous),
+            pseudonym: existingProblem.pseudonym || null,
+          },
+        ];
+      }
+
+      const deduplicatedAll = deduplicateReporters([...baseReports, reportData]);
+      const otherReporters = deduplicatedAll.filter(
+        (r) => r.userId !== authorId && r.userName?.toLowerCase() !== authorName?.toLowerCase()
+      );
+
       if (db) {
         try {
           // Record in Firestore problemReports collection
@@ -524,6 +587,8 @@ export const submitProblem = async ({
           if (!isAlreadyReported) {
             updatePayload.affectedUserCount = increment(1);
             updatePayload.affectedUserIds = arrayUnion(authorId);
+            updatePayload.reporters = arrayUnion(reporterEntry);
+            updatePayload.reporterNames = arrayUnion(authorName);
           }
 
           // If it was solved or archived, a new report can re-activate or note recurrence (Requirement 20)
@@ -544,6 +609,8 @@ export const submitProblem = async ({
         ...existingProblem,
         affectedUserCount: newCount,
         affectedUserIds: updatedUserIds,
+        reporters: deduplicatedAll,
+        reporterNames: deduplicatedAll.map((r) => r.userName),
         updatedAt: new Date().toISOString(),
         isAggregated: true,
         isDuplicateUser: isAlreadyReported,
@@ -557,6 +624,8 @@ export const submitProblem = async ({
         isDuplicateUser: isAlreadyReported,
         previousAffectedCount: prevCount,
         affectedUserCount: newCount,
+        allReporters: deduplicatedAll,
+        otherReporters,
         aggregationNotice: isAlreadyReported
           ? `You have already reported this issue. Affected users remain ${prevCount}.`
           : `This problem already exists. Your report has been added to the existing problem. Affected users: ${prevCount} → ${newCount}`,
@@ -592,6 +661,15 @@ export const submitProblem = async ({
     upvotedBy: [],
     affectedUserCount: 1,
     affectedUserIds: [authorId],
+    reporters: [
+      {
+        userId: authorId,
+        userName: authorName,
+        isAnonymous: Boolean(isAnonymous),
+        pseudonym: pseudonym || null,
+      },
+    ],
+    reporterNames: [authorName],
     stillReportingCount: 0,
     resolutionPendingVerification: false,
     createdAt: serverTimestamp(),

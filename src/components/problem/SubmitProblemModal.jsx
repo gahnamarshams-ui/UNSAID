@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   AlertTriangle,
   Send,
@@ -21,7 +21,7 @@ import {
 import { ModalShell } from '../ui/ModalShell';
 import { Button } from '../ui/Button';
 import { Badge } from '../ui/Badge';
-import { submitProblem } from '../../services/problemService';
+import { submitProblem, deduplicateReporters } from '../../services/problemService';
 import { uploadProblemImage, validateImageFile } from '../../services/storageService';
 import { getActiveQuickPicks, getContextualSubIssues } from '../../config/quickPicksConfig';
 import { getShiftStatus } from '../../config/shiftConfig';
@@ -63,6 +63,29 @@ export const SubmitProblemModal = ({
   const [isAIModalOpen, setIsAIModalOpen] = useState(false);
   const [resolvedLocallyNotice, setResolvedLocallyNotice] = useState(false);
   const [aggregationResult, setAggregationResult] = useState(null);
+
+  const otherReportersList = useMemo(() => {
+    if (!aggregationResult) return [];
+    const currentUid = (propCurrentUser || currentUser)?.uid;
+    const currentName = (
+      (propUserProfile || userProfile)?.fullName ||
+      (propCurrentUser || currentUser)?.displayName ||
+      ''
+    ).trim().toLowerCase();
+
+    const rawList =
+      aggregationResult.otherReporters ||
+      aggregationResult.allReporters ||
+      aggregationResult.reporters ||
+      [];
+
+    const deduplicated = deduplicateReporters(rawList);
+    return deduplicated.filter(
+      (r) =>
+        r.userId !== currentUid &&
+        (!r.userName || r.userName.trim().toLowerCase() !== currentName)
+    );
+  }, [aggregationResult, propCurrentUser, currentUser, propUserProfile, userProfile]);
 
   // Photo Upload & Camera State
   const [selectedImage, setSelectedImage] = useState(null);
@@ -387,55 +410,72 @@ export const SubmitProblemModal = ({
         maxWidth="lg"
       >
         {aggregationResult ? (
-          <div className="py-8 px-4 text-center space-y-5 animate-in fade-in zoom-in-95 duration-200">
+          <div className="py-6 px-4 text-center space-y-4 animate-in fade-in zoom-in-95 duration-200">
             <div className="w-14 h-14 mx-auto rounded-2xl bg-[var(--cyan)]/15 border border-[var(--cyan)]/30 text-[var(--cyan)] flex items-center justify-center shadow-lg shadow-[var(--cyan)]/10">
               <Users className="w-7 h-7" />
             </div>
 
-            <div className="space-y-1.5">
+            <div className="space-y-1">
               <Badge variant="cyan" size="sm" className="mb-1 font-semibold">
                 Existing Problem Found
               </Badge>
               <h3 className="text-base font-bold text-[var(--text)]">
-                {aggregationResult.isDuplicateUser
-                  ? 'Already Counted in This Issue'
-                  : 'Your Report Has Been Added to an Existing Problem'}
+                {aggregationResult.title}
               </h3>
-              <p className="text-xs text-[var(--text-secondary)] max-w-sm mx-auto leading-relaxed">
-                {aggregationResult.isDuplicateUser
-                  ? 'You have already reported this problem in its active cycle. Your report is linked, and the affected-user count already includes you.'
-                  : 'An active problem matching your report already exists in this workspace. Your report has been added to increase community priority for administrators.'}
+              <p className="text-xs text-[var(--cyan)] font-bold">
+                {aggregationResult.affectedUserCount || 1}{' '}
+                {Number(aggregationResult.affectedUserCount || 1) === 1
+                  ? 'user is affected'
+                  : 'users are affected'}
               </p>
             </div>
 
-            <div className="p-3.5 rounded-2xl bg-[var(--surface)] border border-[var(--glass-border)] text-left space-y-2.5 max-w-md mx-auto">
+            <div className="p-4 rounded-2xl bg-[var(--surface)] border border-[var(--glass-border)] text-left space-y-3 max-w-md mx-auto">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-[10px] font-mono uppercase tracking-wider text-[var(--text-muted)]">
-                  Linked Problem
+                  Linked Incident
                 </span>
                 <Badge variant="neutral" size="xs">
                   {aggregationResult.category || 'General'}
                 </Badge>
               </div>
-              <p className="text-xs font-semibold text-[var(--text)] line-clamp-2">
-                {aggregationResult.title}
-              </p>
-              <div className="pt-2 border-t border-[var(--glass-border)] flex items-center justify-between text-xs">
-                <span className="text-[var(--text-secondary)] font-medium">Affected Users</span>
+
+              {/* Other users who reported this */}
+              {otherReportersList.length > 0 ? (
+                <div className="space-y-2 pt-1 border-t border-[var(--glass-border)]">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-[var(--text-secondary)] block">
+                    Other users who reported this:
+                  </span>
+                  <ul className="space-y-1.5 pl-0.5">
+                    {otherReportersList.map((r, idx) => (
+                      <li
+                        key={r.userId || r.id || idx}
+                        className="text-xs text-[var(--text)] flex items-center gap-2 font-medium"
+                      >
+                        <span className="w-1.5 h-1.5 rounded-full bg-[var(--cyan)] shrink-0" />
+                        <span>{r.userName || r.displayName || 'Workspace Member'}</span>
+                        {r.isAnonymous && (
+                          <span className="text-[10px] text-[var(--text-muted)] italic">(anon)</span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : (
+                <div className="pt-1 border-t border-[var(--glass-border)] text-xs text-[var(--text-secondary)]">
+                  You are the first to report this issue in this cycle.
+                </div>
+              )}
+
+              <div className="pt-2.5 border-t border-[var(--glass-border)] text-xs">
                 {aggregationResult.isDuplicateUser ? (
-                  <Badge variant="primary" size="sm" className="font-semibold">
-                    👥 {aggregationResult.affectedUserCount || 1} unique users
-                  </Badge>
+                  <span className="text-[var(--text-secondary)]">
+                    You have already reported this problem. Your report is linked.
+                  </span>
                 ) : (
-                  <div className="flex items-center gap-1.5 font-bold">
-                    <span className="text-[var(--text-muted)] line-through text-xs">
-                      {aggregationResult.previousAffectedCount || 1}
-                    </span>
-                    <span className="text-[var(--text-muted)]">→</span>
-                    <span className="text-[var(--cyan)] px-2 py-0.5 rounded-full bg-[var(--cyan)]/10 border border-[var(--cyan)]/30">
-                      👥 {aggregationResult.affectedUserCount} affected users
-                    </span>
-                  </div>
+                  <span className="text-[var(--success)] font-medium">
+                    ✓ Your report has been added to this problem.
+                  </span>
                 )}
               </div>
             </div>

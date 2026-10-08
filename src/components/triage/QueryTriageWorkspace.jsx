@@ -57,6 +57,7 @@ import {
   deleteProblem,
   subscribeToProblemReports,
   submitResolutionVerification,
+  deduplicateReporters,
 } from '../../services/problemService';
 import { subscribeToProblemPoll } from '../../services/pollService';
 
@@ -297,6 +298,31 @@ export const QueryTriageWorkspace = ({
       unsubReports();
     };
   }, [selectedProblem?.id, isAdmin]);
+
+  const deduplicatedReportersList = useMemo(() => {
+    if (!selectedProblem) return [];
+    const combined = [...(reporters || [])];
+    if (Array.isArray(selectedProblem.reporters)) {
+      combined.push(...selectedProblem.reporters);
+    }
+    if (Array.isArray(selectedProblem.reporterNames)) {
+      selectedProblem.reporterNames.forEach((name) => combined.push({ userName: name }));
+    }
+    if (combined.length === 0 && selectedProblem.authorName) {
+      combined.push({
+        userId: selectedProblem.authorId || selectedProblem.createdBy,
+        userName: selectedProblem.authorName,
+        isAnonymous: Boolean(selectedProblem.isAnonymous),
+        pseudonym: selectedProblem.pseudonym || null,
+      });
+    }
+    return deduplicateReporters(combined);
+  }, [reporters, selectedProblem]);
+
+  const uniqueAffectedCount = Math.max(
+    Number(selectedProblem?.affectedUserCount || 1),
+    deduplicatedReportersList.length
+  );
 
   // Scroll to bottom on messages update
   useEffect(() => {
@@ -1112,10 +1138,8 @@ export const QueryTriageWorkspace = ({
                     <div>
                       <div className="flex items-center gap-2">
                         <span className="text-sm font-bold text-[var(--text)]">
-                          {selectedProblem.affectedUserCount || reporters.length || 1}{' '}
-                          {Number(selectedProblem.affectedUserCount || reporters.length || 1) === 1
-                            ? 'Affected User'
-                            : 'Affected Users'}
+                          {uniqueAffectedCount}{' '}
+                          {uniqueAffectedCount === 1 ? 'Affected User' : 'Affected Users'}
                         </span>
                         {selectedProblem.isReopened && (
                           <Badge variant="high" size="xs">
@@ -1143,23 +1167,45 @@ export const QueryTriageWorkspace = ({
                   )}
                 </div>
 
-                {/* Unique reporters list */}
-                {reporters.length > 0 && (
-                  <div className="pt-2 border-t border-[var(--glass-border)] flex items-center gap-1.5 flex-wrap">
-                    <span className="text-[10px] uppercase font-bold text-[var(--text-muted)] mr-1">
-                      Unique Affected Reporters ({reporters.length}):
+                {/* Reporters section */}
+                <div className="pt-3 border-t border-[var(--glass-border)] space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold uppercase tracking-wider text-[var(--text)] flex items-center gap-1.5">
+                      <Users className="w-3.5 h-3.5 text-[var(--cyan)]" />
+                      <span>Reporters ({deduplicatedReportersList.length})</span>
                     </span>
-                    {reporters.map((rep) => (
-                      <span
-                        key={rep.id}
-                        className="text-[11px] px-2 py-0.5 rounded-lg bg-[var(--surface)] border border-[var(--glass-border)] text-[var(--text)] flex items-center gap-1"
-                      >
-                        <User className="w-2.5 h-2.5 text-[var(--primary)]" />
-                        <span>{rep.isAnonymous ? (rep.pseudonym || 'Anonymous') : (rep.userName || 'Member')}</span>
-                      </span>
-                    ))}
+                    <span className="text-[10px] text-[var(--text-muted)]">
+                      {deduplicatedReportersList.length === 1 ? '1 unique reporter' : `${deduplicatedReportersList.length} unique reporters`}
+                    </span>
                   </div>
-                )}
+
+                  <div className="space-y-1.5 pl-0.5">
+                    {deduplicatedReportersList.length > 0 ? (
+                      deduplicatedReportersList.map((rep, idx) => (
+                        <div
+                          key={rep.userId || rep.id || idx}
+                          className="flex items-center justify-between py-1.5 px-3 rounded-xl bg-[var(--surface)] border border-[var(--glass-border)] text-xs text-[var(--text)]"
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className="w-1.5 h-1.5 rounded-full bg-[var(--cyan)] shrink-0" />
+                            <span className="font-semibold">
+                              {rep.isAnonymous ? (rep.pseudonym || 'Anonymous') : (rep.userName || 'Member')}
+                            </span>
+                          </div>
+                          {rep.isAnonymous ? (
+                            <span className="text-[10px] text-[var(--text-muted)] italic font-mono">(anon)</span>
+                          ) : rep.userEmail ? (
+                            <span className="text-[10px] text-[var(--text-muted)] truncate max-w-[150px]">{rep.userEmail}</span>
+                          ) : null}
+                        </div>
+                      ))
+                    ) : (
+                      <div className="text-xs text-[var(--text-muted)]">
+                        No reporters recorded.
+                      </div>
+                    )}
+                  </div>
+                </div>
               </div>
 
               {/* Reporter Identity Context Card */}
