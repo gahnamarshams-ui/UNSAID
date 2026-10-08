@@ -21,16 +21,23 @@ import {
   ShieldCheck,
   AlertCircle,
   X,
+  Sparkles,
+  Bot,
+  Lightbulb,
+  Loader2,
+  Trash2,
 } from 'lucide-react';
 
 import { GlassCard } from '../ui/GlassCard';
 import { Button } from '../ui/Button';
 import { Badge } from '../ui/Badge';
 import { CommunityPollWidget } from '../poll/CommunityPollWidget';
+import { AdminAISummaryModal } from './AdminAISummaryModal';
 import { useAuth } from '../../hooks/useAuth';
 import { useIdentity } from '../../hooks/useIdentity';
 import { getShiftStatus } from '../../config/shiftConfig';
 import { buildProblemActivityTimeline } from '../../utils/activityTimeline';
+import { fetchAIResolution } from '../../services/aiResolutionService';
 
 import {
   subscribeToProblemMessages,
@@ -46,6 +53,7 @@ import {
   markProblemRecurring,
   updateProblemStatus,
   markProblemThreadRead,
+  deleteProblem,
 } from '../../services/problemService';
 import { subscribeToProblemPoll } from '../../services/pollService';
 
@@ -150,6 +158,35 @@ export const QueryTriageWorkspace = ({
   const [linkedProblemId, setLinkedProblemId] = useState('');
   const [recurrenceCount, setRecurrenceCount] = useState(2);
   const [savingRecurrence, setSavingRecurrence] = useState(false);
+
+  // Gemini AI Triage & Summary States
+  const [showAISummaryModal, setShowAISummaryModal] = useState(false);
+  const [analyzingWithAI, setAnalyzingWithAI] = useState(false);
+  const [aiTriageAnalysis, setAiTriageAnalysis] = useState(null);
+  const [aiTriageError, setAiTriageError] = useState('');
+
+  // Delete Query State
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deletingQuery, setDeletingQuery] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
+
+  const handleDeleteQuery = async () => {
+    if (!selectedProblem?.id) return;
+    setDeletingQuery(true);
+    setDeleteError('');
+    try {
+      await deleteProblem(selectedProblem.id, workspace?.id || selectedProblem.workspaceId);
+      setShowDeleteModal(false);
+      setInternalSelectedId(null);
+      if (onSelectProblem) onSelectProblem(null);
+      if (onProblemUpdated) onProblemUpdated({ id: selectedProblem.id, deleted: true });
+    } catch (err) {
+      console.error('[UNSAID Admin Delete Query Error]', err);
+      setDeleteError(err.message || 'Failed to delete query.');
+    } finally {
+      setDeletingQuery(false);
+    }
+  };
 
   // Role Checks
   const isAdmin =
@@ -570,6 +607,50 @@ export const QueryTriageWorkspace = ({
     }
   };
 
+  // Sync AI analysis when selectedProblem changes
+  useEffect(() => {
+    let ignore = false;
+    queueMicrotask(() => {
+      if (!ignore) {
+        setAiTriageAnalysis(selectedProblem?.aiAnalysis || null);
+        setAiTriageError('');
+      }
+    });
+    return () => {
+      ignore = true;
+    };
+  }, [selectedProblem?.id, selectedProblem?.aiAnalysis]);
+
+  const handleRunAIAnalyze = async () => {
+    if (!selectedProblem || !workspace?.id) return;
+    setAnalyzingWithAI(true);
+    setAiTriageError('');
+
+    try {
+      const res = await fetchAIResolution({
+        workspaceId: workspace.id,
+        title: selectedProblem.title,
+        description: selectedProblem.description,
+        category: selectedProblem.category,
+        subIssue: selectedProblem.subIssue,
+        workaround: selectedProblem.workaround,
+        isEmergency: selectedProblem.isEmergency,
+        candidateProblems: problems.filter((p) => p.id !== selectedProblem.id),
+      });
+
+      if (res.available && res.analysis) {
+        setAiTriageAnalysis(res.analysis);
+      } else {
+        setAiTriageError(res.message || 'AI analysis temporarily unavailable.');
+      }
+    } catch (err) {
+      console.error('[UNSAID AI Triage Error]', err);
+      setAiTriageError('Failed to run AI analysis.');
+    } finally {
+      setAnalyzingWithAI(false);
+    }
+  };
+
   const toggleDismissReveal = (msgId) => {
     setRevealedDismissedIds((prev) => {
       const next = new Set(prev);
@@ -600,13 +681,22 @@ export const QueryTriageWorkspace = ({
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="text-xs text-[var(--text-muted)]">
               Workspace:{' '}
               <strong className="text-[var(--text)]">
                 {workspace?.name || 'Default Workspace'}
               </strong>
             </span>
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={<Bot className="w-3.5 h-3.5 text-[var(--cyan)]" />}
+              onClick={() => setShowAISummaryModal(true)}
+              className="text-xs h-7 ml-1"
+            >
+              AI Summary
+            </Button>
           </div>
         </div>
 
@@ -907,9 +997,24 @@ export const QueryTriageWorkspace = ({
                     </span>
                   </div>
 
-                  <span className="text-[11px] text-[var(--text-muted)] font-mono">
-                    Workspace: {workspace?.name || 'Current'}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] text-[var(--text-muted)] font-mono">
+                      Workspace: {workspace?.name || 'Current'}
+                    </span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => {
+                        setDeleteError('');
+                        setShowDeleteModal(true);
+                      }}
+                      className="text-xs text-[var(--danger)] hover:bg-[var(--danger)]/15 h-7 px-2"
+                      icon={<Trash2 className="w-3.5 h-3.5 text-[var(--danger)]" />}
+                    >
+                      Delete
+                    </Button>
+                  </div>
                 </div>
 
                 <h3 className="text-lg font-extrabold text-[var(--text)] tracking-tight">
@@ -932,6 +1037,141 @@ export const QueryTriageWorkspace = ({
                 )}
               </div>
 
+              {/* ========================================================= */}
+              {/* UNSAID AI TRIAGE ASSESSMENT & RECOMMENDATIONS              */}
+              {/* ========================================================= */}
+              <div className="p-4 rounded-2xl bg-[var(--surface-hover)] border border-[var(--cyan)]/25 space-y-3">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="w-6 h-6 rounded-lg bg-[var(--cyan)]/15 text-[var(--cyan)] flex items-center justify-center">
+                      <Sparkles className="w-3.5 h-3.5" />
+                    </span>
+                    <span className="text-xs font-bold text-[var(--text)]">
+                      UNSAID AI Triage Assessment
+                    </span>
+                    {aiTriageAnalysis && (
+                      <Badge variant="cyan" size="sm">
+                        AI Assessment
+                      </Badge>
+                    )}
+                  </div>
+
+                  <Button
+                    type="button"
+                    variant={aiTriageAnalysis ? 'ghost' : 'secondary'}
+                    size="sm"
+                    icon={analyzingWithAI ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5 text-[var(--cyan)]" />}
+                    onClick={handleRunAIAnalyze}
+                    isLoading={analyzingWithAI}
+                    disabled={analyzingWithAI}
+                    className="text-xs h-7"
+                  >
+                    {aiTriageAnalysis ? 'Re-analyze with AI' : 'AI Analyze'}
+                  </Button>
+                </div>
+
+                {/* If analysis is available */}
+                {aiTriageAnalysis && (
+                  <div className="space-y-3 pt-1 text-xs">
+                    {/* User AI Escalation Banner */}
+                    {(aiTriageAnalysis.escalatedFromAI || selectedProblem?.aiAnalysis?.escalatedFromAI) && (
+                      <div className="p-3 rounded-xl bg-[var(--danger)]/10 border border-[var(--danger)]/30 flex items-center justify-between flex-wrap gap-2 text-xs">
+                        <div className="flex items-center gap-2 text-[var(--danger)] font-medium">
+                          <AlertCircle className="w-4 h-4 shrink-0" />
+                          <span>Escalated from User AI: The user attempted the AI solution below, but it did not resolve their issue.</span>
+                        </div>
+                        <Badge variant="high" size="sm">
+                          AI Escalation
+                        </Badge>
+                      </div>
+                    )}
+
+                    {/* Priority Comparison Notice */}
+                    <div className="p-2.5 rounded-xl bg-[var(--surface)] border border-[var(--glass-border)] flex items-center justify-between flex-wrap gap-2">
+                      <span className="text-[11px] text-[var(--text-muted)]">
+                        Priority Evaluation:
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] text-[var(--text-secondary)]">
+                          Admin Priority: <strong className="uppercase">{selectedProblem.priority || 'normal'}</strong>
+                        </span>
+                        <span className="text-[var(--text-muted)]">·</span>
+                        <span className="text-[11px] font-semibold text-[var(--cyan)]">
+                          AI recommends {aiTriageAnalysis.priority ? (aiTriageAnalysis.priority.charAt(0).toUpperCase() + aiTriageAnalysis.priority.slice(1)) : 'Normal'} priority
+                        </span>
+                        <Badge
+                          variant={
+                            aiTriageAnalysis.priority === 'high'
+                              ? 'high'
+                              : aiTriageAnalysis.priority === 'low'
+                              ? 'low'
+                              : 'medium'
+                          }
+                          size="sm"
+                        >
+                          {aiTriageAnalysis.priority ? aiTriageAnalysis.priority.toUpperCase() : 'NORMAL'}
+                        </Badge>
+                      </div>
+                    </div>
+
+                    {/* Problem Summary & Likely Cause */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                      <div className="p-3 rounded-xl bg-[var(--surface)] border border-[var(--glass-border)] space-y-1">
+                        <span className="text-[10px] uppercase font-bold text-[var(--cyan)] block">
+                          Problem Summary
+                        </span>
+                        <p className="text-[11px] text-[var(--text)] leading-relaxed">
+                          {aiTriageAnalysis.summary}
+                        </p>
+                      </div>
+
+                      <div className="p-3 rounded-xl bg-[var(--surface)] border border-[var(--glass-border)] space-y-1">
+                        <span className="text-[10px] uppercase font-bold text-[var(--text-muted)] block">
+                          Likely Cause
+                        </span>
+                        <p className="text-[11px] text-[var(--text)] leading-relaxed">
+                          {aiTriageAnalysis.likelyCause || 'Operational or physical malfunction'}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Suggested Next Action & Human Attention */}
+                    <div className="p-3 rounded-xl bg-[var(--surface)] border border-[var(--glass-border)] space-y-2">
+                      <div className="flex items-center justify-between flex-wrap gap-2">
+                        <span className="text-[10px] uppercase font-bold text-[var(--text-muted)] flex items-center gap-1.5">
+                          <Lightbulb className="w-3.5 h-3.5 text-[var(--cyan)]" />
+                          Suggested Next Action
+                        </span>
+                        <Badge
+                          variant={aiTriageAnalysis.needsHumanAttention ? 'warning' : 'low'}
+                          size="sm"
+                        >
+                          {aiTriageAnalysis.needsHumanAttention ? 'Staff Action Required' : 'Self-Service Possible'}
+                        </Badge>
+                      </div>
+                      <p className="text-[11px] text-[var(--text-secondary)] leading-relaxed">
+                        {aiTriageAnalysis.suggestedWorkaround}
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* If error occurred */}
+                {aiTriageError && (
+                  <div className="p-3 rounded-xl bg-[var(--surface)] border border-[var(--glass-border)] text-xs text-[var(--warning)] flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 shrink-0" />
+                    <span>{aiTriageError}</span>
+                  </div>
+                )}
+
+                {/* Prompt to analyze if none present yet */}
+                {!aiTriageAnalysis && !aiTriageError && !analyzingWithAI && (
+                  <p className="text-xs text-[var(--text-muted)]">
+                    Click "AI Analyze" to generate root cause insights, priority recommendations, and actionable triage steps.
+                  </p>
+                )}
+              </div>
+
               {/* Metadata Bar */}
               <div className="p-3 rounded-xl bg-[var(--surface)] border border-[var(--glass-border)] grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
                 <div>
@@ -941,6 +1181,11 @@ export const QueryTriageWorkspace = ({
                   <span className="font-medium text-[var(--text)] truncate block mt-0.5">
                     {selectedProblem.authorName || selectedProblem.authorEmail || 'Member'}
                   </span>
+                  {selectedProblem.authorEmail && (
+                    <span className="text-[10px] text-[var(--text-muted)] font-mono truncate block mt-0.5">
+                      {selectedProblem.authorEmail}
+                    </span>
+                  )}
                 </div>
                 <div>
                   <span className="text-[10px] uppercase font-bold text-[var(--text-muted)] block">
@@ -1671,6 +1916,72 @@ export const QueryTriageWorkspace = ({
           </GlassCard>
         </div>
       )}
+
+      {/* Delete Query Modal */}
+      {showDeleteModal && selectedProblem && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-md animate-in fade-in duration-200">
+          <div className="w-full max-w-md p-6 rounded-3xl bg-[var(--surface)] border border-[var(--glass-border)] shadow-2xl space-y-5 animate-in zoom-in-95 duration-200">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-[var(--danger)]/15 border border-[var(--danger)]/30 text-[var(--danger)] flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-[var(--text)]">Delete Query?</h3>
+                <p className="text-xs text-[var(--text-muted)]">Permanent removal from workspace</p>
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-[var(--surface-hover)] border border-[var(--glass-border)] space-y-1">
+              <p className="text-xs font-bold text-[var(--text)] line-clamp-1">{selectedProblem.title}</p>
+              <p className="text-[11px] text-[var(--text-secondary)] line-clamp-2">{selectedProblem.description}</p>
+            </div>
+
+            <p className="text-xs text-[var(--text-muted)] leading-relaxed">
+              Are you sure you want to delete this query? It will be permanently removed along with all messages, acknowledgements, and triage history.
+            </p>
+
+            {deleteError && (
+              <p className="text-xs text-[var(--danger)] bg-[var(--danger)]/10 p-2.5 rounded-xl border border-[var(--danger)]/20">
+                {deleteError}
+              </p>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                disabled={deletingQuery}
+                onClick={() => {
+                  setShowDeleteModal(false);
+                  setDeleteError('');
+                }}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                variant="danger"
+                size="sm"
+                isLoading={deletingQuery}
+                disabled={deletingQuery}
+                onClick={handleDeleteQuery}
+                icon={<Trash2 className="w-3.5 h-3.5" />}
+              >
+                Delete Query
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* AI Executive Summary Modal */}
+      <AdminAISummaryModal
+        isOpen={showAISummaryModal}
+        onClose={() => setShowAISummaryModal(false)}
+        workspace={workspace}
+        problems={problems}
+      />
     </div>
   );
 };

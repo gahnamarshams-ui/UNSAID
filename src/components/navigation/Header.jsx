@@ -60,9 +60,8 @@ export const Header = ({ onOpenNotifications }) => {
             className="flex items-center gap-2.5 group select-none cursor-pointer"
           >
             {/* Logo Mark */}
-            <div className="relative w-9 h-9 sm:w-10 sm:h-10 rounded-xl flex items-center justify-center shadow-md group-hover:scale-105 transition-transform duration-200 overflow-hidden">
-              <UnsaidLogoMark className="w-full h-full" showShadow={false} />
-              <span className="absolute inset-0 rounded-xl bg-white/20 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
+            <div className="relative w-9 h-9 sm:w-10 sm:h-10 flex items-center justify-center group-hover:scale-105 transition-transform duration-200">
+              <UnsaidLogoMark className="w-full h-full" showShadow />
             </div>
 
             {/* Title */}
@@ -258,18 +257,32 @@ export const Header = ({ onOpenNotifications }) => {
               {/* Theme Toggle */}
               <ThemeToggle />
 
-              {/* Profile Avatar Link */}
-              <Link to="/account" title="Account settings">
+              {/* Profile Avatar & Email ID Card */}
+              <Link
+                to="/account"
+                title={`Account settings (${currentUser?.email || 'Authenticated'})`}
+                className="flex items-center gap-2 p-1 sm:pr-2.5 rounded-full bg-[var(--surface)] hover:bg-[var(--surface-hover)] border border-[var(--glass-border)] transition-all cursor-pointer group shadow-sm"
+              >
                 <Avatar
-                  name={userProfile?.fullName || currentUser?.displayName || 'User'}
+                  name={userProfile?.fullName || currentUser?.displayName || currentUser?.email || 'User'}
                   src={
                     userProfile?.avatarPreference === 'initials'
                       ? null
                       : userProfile?.avatarUrl || currentUser?.photoURL
                   }
-                  size="md"
+                  size="sm"
                   isOnline={true}
                 />
+                <div className="hidden sm:flex flex-col text-left leading-tight max-w-[140px] md:max-w-[190px]">
+                  <span className="text-xs font-semibold text-[var(--text)] group-hover:text-[var(--cyan)] transition-colors truncate">
+                    {userProfile?.fullName || currentUser?.displayName || (currentUser?.email ? currentUser.email.split('@')[0] : 'Member')}
+                  </span>
+                  {currentUser?.email && (
+                    <span className="text-[10px] text-[var(--text-muted)] truncate">
+                      {currentUser.email}
+                    </span>
+                  )}
+                </div>
               </Link>
 
               {/* Sign Out Button */}

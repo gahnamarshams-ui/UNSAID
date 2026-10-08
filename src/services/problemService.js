@@ -108,6 +108,7 @@ export const submitProblem = async ({
   pseudonym = null,
   imageUrl = null,
   imagePath = null,
+  aiAnalysis = null,
 }) => {
   if (!workspaceId) {
     throw new Error('Workspace identifier is required to submit a problem.');
@@ -152,6 +153,7 @@ export const submitProblem = async ({
     isAnonymous: Boolean(isAnonymous),
     imageUrl: imageUrl || null,
     imagePath: imagePath || null,
+    aiAnalysis: aiAnalysis || null,
     upvotesCount: 0,
     upvotedBy: [],
     createdAt: serverTimestamp(),
@@ -1057,4 +1059,37 @@ export const markProblemRecurring = async ({
   return { isRecurring: true, recurrenceOf, linkedProblemTitle, recurrenceCount };
 };
 
+/**
+ * Permanently deletes a problem/query.
+ * Authorized for the author who reported the problem or workspace administrators.
+ *
+ * @param {string} problemId
+ * @param {string} [workspaceId]
+ * @returns {Promise<{ success: boolean }>}
+ */
+export const deleteProblem = async (problemId, workspaceId) => {
+  if (!problemId) {
+    throw new Error('Problem identifier is required to delete.');
+  }
 
+  // Remove from local storage cache if workspaceId is provided
+  if (workspaceId) {
+    try {
+      const existing = getLocalProblems(workspaceId);
+      const filtered = existing.filter((p) => p.id !== problemId);
+      localStorage.setItem(
+        `${LOCAL_STORAGE_PROBLEMS_PREFIX}${workspaceId}`,
+        JSON.stringify(filtered)
+      );
+    } catch (err) {
+      console.warn('[UNSAID Problem Service] Failed to remove from local cache:', err);
+    }
+  }
+
+  if (db) {
+    const probRef = doc(db, 'problems', problemId);
+    await withTimeout(deleteDoc(probRef), 7000);
+  }
+
+  return { success: true };
+};
